@@ -1,0 +1,264 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/andface_black"
+    android:keepScreenOn="true">
+
+    <androidx.camera.view.PreviewView
+        android:id="@+id/previewView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:implementationMode="compatible"
+        app:scaleType="fillCenter" />
+
+    <dev.andface.galaxy.ui.LandmarkOverlayView
+        android:id="@+id/landmarkOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <LinearLayout
+        android:id="@+id/topBar"
+        android:layout_width="match_parent"
+        android:layout_height="72dp"
+        android:background="@color/andface_panel"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="16dp">
+
+        <TextView
+            android:id="@+id/userLabel"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="&#xC778;&#xC99D; &#xD655;&#xC778; &#xC911;"
+            android:textColor="@color/andface_text"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/modelStateText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:filterTouchesWhenObscured="true"
+            android:text="LIVE"
+            android:textColor="@color/andface_muted"
+            android:textSize="13sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/dashboard"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:background="@color/andface_panel"
+        android:orientation="vertical"
+        android:paddingStart="16dp"
+        android:paddingTop="16dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="28dp">
+
+<LinearLayout
+            android:id="@+id/hintsRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:orientation="horizontal">
+
+            <CheckBox
+                android:id="@+id/lowerFaceHint"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:buttonTint="@color/andface_green"
+                android:filterTouchesWhenObscured="true"
+                android:text="&#xB9C8;&#xC2A4;&#xD06C;"
+                android:textColor="@color/andface_text"
+                android:textSize="12sp" />
+
+            <CheckBox
+                android:id="@+id/glassesHint"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:buttonTint="@color/andface_green"
+                android:filterTouchesWhenObscured="true"
+                android:text="&#xC548;&#xACBD;"
+                android:textColor="@color/andface_text"
+                android:textSize="12sp" />
+
+            <CheckBox
+                android:id="@+id/leftPatchHint"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:buttonTint="@color/andface_green"
+                android:filterTouchesWhenObscured="true"
+                android:text="&#xC67C;&#xC548;&#xB300;"
+                android:textColor="@color/andface_text"
+                android:textSize="12sp" />
+
+            <CheckBox
+                android:id="@+id/rightPatchHint"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:buttonTint="@color/andface_green"
+                android:filterTouchesWhenObscured="true"
+                android:text="&#xC624;&#xB978;&#xC548;&#xB300;"
+                android:textColor="@color/andface_text"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/registerButton"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:filterTouchesWhenObscured="true"
+                android:text="&#xB4F1;&#xB85D; &#xC0AC;&#xC6A9;&#xC790;1" />
+
+            <Button
+                android:id="@+id/clearButton"
+                android:layout_width="104dp"
+                android:layout_height="48dp"
+                android:layout_marginStart="8dp"
+                android:filterTouchesWhenObscured="true"
+                android:text="&#xCD08;&#xAE30;&#xD654;" />
+        </LinearLayout>
+        <TextView
+            android:id="@+id/resultText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="&#xC778;&#xC99D; &#xC2E4;&#xD328;"
+            android:textColor="@color/andface_red"
+            android:textSize="28sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/failureReasonText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="&#xB4F1;&#xB85D; &#xC5C6;&#xC74C;"
+            android:textColor="@color/andface_muted"
+            android:textSize="13sp" />
+
+        <GridLayout
+            android:id="@+id/metricsGrid"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:columnCount="2"
+            android:rowCount="5">
+
+            <TextView
+                android:id="@+id/matchedUserText"
+                style="@style/MetricText"
+                android:text="&#xCD5C;&#xC6B0;&#xC120; --" />
+
+            <TextView
+                android:id="@+id/registeredUsersText"
+                style="@style/MetricText"
+                android:text="&#xB4F1;&#xB85D; 0/3" />
+
+            <TextView
+                android:id="@+id/fuzzyScoreText"
+                style="@style/MetricText"
+                android:text="Fuzzy 0.000" />
+
+            <TextView
+                android:id="@+id/mahalanobisScoreText"
+                style="@style/MetricText"
+                android:text="&#xB9C8;&#xD560;&#xB77C;&#xB178;&#xBE44;&#xC2A4; 0.000" />
+
+            <TextView
+                android:id="@+id/finalScoreText"
+                style="@style/MetricText"
+                android:text="&#xCD5C;&#xC885; 0.000" />
+
+            <TextView
+                android:id="@+id/coverageText"
+                style="@style/MetricText"
+                android:text="&#xAD00;&#xCE21;&#xB960; 0.000" />
+
+            <TextView
+                android:id="@+id/marginText"
+                style="@style/MetricText"
+                android:text="&#xB9C8;&#xC9C4; 0.000" />
+
+            <TextView
+                android:id="@+id/livenessText"
+                style="@style/MetricText"
+                android:text="&#xC0DD;&#xB3D9;&#xC131; 0.000 &#xC2E4;&#xD328;" />
+
+            <TextView
+                android:id="@+id/observableText"
+                style="@style/MetricText"
+                android:text="&#xAD00;&#xCE21; 0/170" />
+
+            <TextView
+                android:id="@+id/occlusionText"
+                style="@style/MetricText"
+                android:text="&#xAC00;&#xB9BC; &#xC5C6;&#xC74C;" />
+        </GridLayout>
+
+        <LinearLayout
+            android:id="@+id/userSelectorPanel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:orientation="vertical">
+
+            <RadioGroup
+                android:id="@+id/userSelector"
+                android:layout_width="match_parent"
+                android:layout_height="42dp"
+                android:orientation="horizontal">
+
+                <RadioButton
+                    android:id="@+id/user1Radio"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:buttonTint="@color/andface_green"
+                    android:checked="true"
+                    android:filterTouchesWhenObscured="true"
+                    android:text="&#xC0AC;&#xC6A9;&#xC790;1"
+                    android:textColor="@color/andface_text"
+                    android:textSize="13sp" />
+
+                <RadioButton
+                    android:id="@+id/user2Radio"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:buttonTint="@color/andface_green"
+                    android:filterTouchesWhenObscured="true"
+                    android:text="&#xC0AC;&#xC6A9;&#xC790;2"
+                    android:textColor="@color/andface_text"
+                    android:textSize="13sp" />
+
+                <RadioButton
+                    android:id="@+id/user3Radio"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:buttonTint="@color/andface_green"
+                    android:filterTouchesWhenObscured="true"
+                    android:text="&#xC0AC;&#xC6A9;&#xC790;3"
+                    android:textColor="@color/andface_text"
+                    android:textSize="13sp" />
+            </RadioGroup>
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>
+
+

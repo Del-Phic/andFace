@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="MetricText">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">32dp</item>
+        <item name="android:layout_columnWeight">1</item>
+        <item name="android:gravity">center_vertical</item>
+        <item name="android:textColor">@color/andface_text</item>
+        <item name="android:textSize">13sp</item>
+    </style>
+</resources>

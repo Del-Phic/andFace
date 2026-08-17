@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="andface_black">#0B0F12</color>
+    <color name="andface_panel">#E612171B</color>
+    <color name="andface_green">#38D47A</color>
+    <color name="andface_red">#FF5A5F</color>
+    <color name="andface_yellow">#FFD166</color>
+    <color name="andface_text">#F7FAFC</color>
+    <color name="andface_muted">#AAB7C4</color>
+</resources>

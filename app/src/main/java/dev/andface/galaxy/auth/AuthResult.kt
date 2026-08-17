@@ -1,0 +1,112 @@
+package dev.andface.galaxy.auth
+
+enum class AuthDecision {
+    SUCCESS,
+    FAILED
+}
+
+enum class FailureReason {
+    NONE,
+    NO_ENROLLMENT,
+    PROFILE_EXPIRED,
+    NO_FACE,
+    MULTIPLE_FACES,
+    MODEL_NOT_READY,
+    DEVICE_NOT_SECURE,
+    DEVICE_LOCKED,
+    WINDOW_NOT_SECURE,
+    KIOSK_MODE_REQUIRED,
+    RUNTIME_INTEGRITY_RISK,
+    DEPLOYMENT_SIGNING_REQUIRED,
+    SECURE_STORAGE_ERROR,
+    OCCLUDED_DURING_ENROLLMENT,
+    POOR_FACE_QUALITY,
+    TOO_FEW_FEATURES,
+    LOW_COVERAGE,
+    LOW_LIVENESS,
+    LOW_MARGIN,
+    LOW_IDENTITY_COVERAGE,
+    LOW_IDENTITY_SUPPORT,
+    LOW_GLOBAL_CONSISTENCY,
+    EXCESSIVE_OCCLUSION,
+    OCCLUSION_HINT_MISMATCH,
+    TOO_MANY_ATTEMPTS,
+    UNSTABLE_DECISION,
+    SESSION_RESET,
+    LOW_SCORE,
+    UNSTABLE_ENROLLMENT
+}
+
+data class AuthResult(
+    val decision: AuthDecision,
+    val failureReason: FailureReason,
+    val matchedUserId: String?,
+    val secondBestUserId: String?,
+    val registeredUserCount: Int,
+    val fuzzyScore: Double,
+    val mahalanobisScore: Double,
+    val finalScore: Double,
+    val coverage: Double,
+    val margin: Double,
+    val livenessScore: Double,
+    val livenessPassed: Boolean,
+    val livenessFrameCount: Int,
+    val livenessChallenge: String?,
+    val livenessChallengePassed: Boolean,
+    val livenessPassivePassed: Boolean,
+    val observableCount: Int,
+    val identityConsistencyScore: Double,
+    val requiredIdentityConsistencyScore: Double,
+    val identityOutlierScore: Double = 0.0,
+    val requiredIdentityOutlierScore: Double = 0.0,
+    val identitySupportCount: Int,
+    val requiredSupportCount: Int,
+    val stableFrameCount: Int,
+    val requiredStableFrames: Int,
+    val occlusionSummary: String,
+    val faceQualityScore: Double = 0.0,
+    val meshSymmetryScore: Double = 0.0,
+    val landmarkTopologyScore: Double = 0.0,
+    val requiredMahalanobisScore: Double = 0.0,
+    val requiredFinalScore: Double = 0.0,
+    val regionalInlierBalancePassed: Boolean = true,
+    val localStructureAgreementPassed: Boolean = true,
+    val microRegionAgreementPassed: Boolean = true,
+    val microRegionDiagnostics: String = ""
+) {
+    companion object {
+        fun failed(reason: FailureReason): AuthResult {
+            return AuthResult(
+                decision = AuthDecision.FAILED,
+                failureReason = reason,
+                matchedUserId = null,
+                secondBestUserId = null,
+                registeredUserCount = 0,
+                fuzzyScore = 0.0,
+                mahalanobisScore = 0.0,
+                finalScore = 0.0,
+                coverage = 0.0,
+                margin = 0.0,
+                livenessScore = 0.0,
+                livenessPassed = false,
+                livenessFrameCount = 0,
+                livenessChallenge = null,
+                livenessChallengePassed = false,
+                livenessPassivePassed = false,
+                observableCount = 0,
+                identityConsistencyScore = 0.0,
+                requiredIdentityConsistencyScore = 0.0,
+                identityOutlierScore = 0.0,
+                requiredIdentityOutlierScore = 0.0,
+                identitySupportCount = 0,
+                requiredSupportCount = 0,
+                stableFrameCount = 0,
+                requiredStableFrames = 0,
+                occlusionSummary = "clean",
+                faceQualityScore = 0.0,
+                meshSymmetryScore = 0.0,
+                landmarkTopologyScore = 0.0
+            )
+        }
+    }
+}

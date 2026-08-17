@@ -1,0 +1,41 @@
+.gradle/
+.gradle-test-home/
+.kotlin/
+build/
+local.properties
+*.iml
+.idea/
+.tools/
+captures/
+app/build/
+app/libs/
+
+# Local Codex state and generated publication artifacts
+.agents/
+.codex/
+.codex_paper_work/
+.codex_report_work/
+tmp/
+outputs/
+deliverables/
+AGENTS.md
+
+# Device evidence and local handoff/report documents
+device_screen*.png
+DEMO_RUNBOOK_KR.md
+DEVICE_VALIDATION_STATUS.md
+FACE_AUTH_VERIFICATION_REPORT.md
+GOAL_COMPLETION_AUDIT.md
+NEW_CHAT_HANDOFF_KR.md
+PACKAGE_README_KR.md
+
+# Build and signing artifacts
+*.apk
+*.aab
+*.idsig
+*.jks
+*.keystore
+*.p12
+*.pfx
+.env
+.env.*
