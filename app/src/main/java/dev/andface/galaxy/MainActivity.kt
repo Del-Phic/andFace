@@ -42,7 +42,6 @@ import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 import dev.andface.galaxy.access.AssetIntegrityPolicy
 import dev.andface.galaxy.access.DedicatedTerminalPolicy
 import dev.andface.galaxy.audit.SecurityAuditLogger
-import dev.andface.galaxy.auth.AccessLockoutStore
 import dev.andface.galaxy.auth.AuthDecision
 import dev.andface.galaxy.auth.AuthDisplayStabilizer
 import dev.andface.galaxy.auth.AuthResult
@@ -50,6 +49,7 @@ import dev.andface.galaxy.auth.AuthSuccessWindowController
 import dev.andface.galaxy.auth.AuthenticationEngine
 import dev.andface.galaxy.auth.EnrollmentCapturePolicy
 import dev.andface.galaxy.auth.FailureReason
+import dev.andface.galaxy.enrollment.EnrollmentCommitter
 import dev.andface.galaxy.enrollment.EnrollmentBuilder
 import dev.andface.galaxy.enrollment.EnrollmentInventoryStore
 import dev.andface.galaxy.enrollment.EnrollmentProfile
@@ -59,6 +59,8 @@ import dev.andface.galaxy.feature.FaceFeatureExtractor
 import dev.andface.galaxy.feature.FeatureType
 import dev.andface.galaxy.feature.RawFeatureFrame
 import dev.andface.galaxy.mediapipe.FaceLandmarkerRunner
+import dev.andface.galaxy.mediapipe.LatestFrameDispatcher
+import dev.andface.galaxy.mediapipe.LiveFrameSession
 import dev.andface.galaxy.occlusion.OcclusionHint
 import dev.andface.galaxy.ui.LandmarkOverlayView
 import java.io.File
@@ -69,6 +71,9 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.Executor
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 
 class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
@@ -98,30 +103,13 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
 
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var analysisExecutor: ExecutorService
+    private lateinit var authenticationExecutor: ExecutorService
     private lateinit var repository: EnrollmentRepository
     private lateinit var profileInventoryStore: EnrollmentInventoryStore
     private lateinit var auditLogger: SecurityAuditLogger
-    private lateinit var accessLockoutStore: AccessLockoutStore
 
     private val featureExtractor = FaceFeatureExtractor()
-    private val authEngine = AuthenticationEngine(
-        securityClockMs = { SystemClock.elapsedRealtime() },
-        onAccessLockout = { untilMs ->
-            if (::accessLockoutStore.isInitialized && !accessLockoutStore.save(untilMs)) {
-                accessLockoutStorageFailed = true
-            }
-        },
-        onRiskyFailureStateChanged = { state ->
-            if (::accessLockoutStore.isInitialized) {
-                val saved = if (state == null) {
-                    accessLockoutStore.clearRiskyFailureWindow()
-                } else {
-                    accessLockoutStore.saveRiskyFailureWindow(state)
-                }
-                if (!saved) accessLockoutStorageFailed = true
-            }
-        }
-    )
+    private val authEngine = AuthenticationEngine()
     private val authSuccessWindowController = AuthSuccessWindowController(
         clockMs = { SystemClock.elapsedRealtime() },
         reissueCooldownMs = AUTH_SUCCESS_WINDOW_REISSUE_COOLDOWN_MS
@@ -131,6 +119,27 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
     )
     private val enrollmentSamples = mutableListOf<RawFeatureFrame>()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val liveFrameSession = LiveFrameSession()
+    private val authenticationInFlight = AtomicBoolean(false)
+    private val authenticationGeneration = AtomicLong(0L)
+    private val frameDispatcher = LatestFrameDispatcher<Runnable>(
+        Executor { mainHandler.post(it) }, { it.run() }
+    )
+    @Volatile private var activityDestroyed = false
+    private var activityResumed = false
+    private var streamTimedOut = false
+    private val streamWatchdog = object : Runnable {
+        override fun run() {
+            if (!acceptingLiveFrames || activityDestroyed) return
+            if (!streamTimedOut && liveFrameSession.timedOut(SystemClock.uptimeMillis())) {
+                streamTimedOut = true
+                resetTransientAccessState(FailureReason.MODEL_NOT_READY)
+                modelStateText.text = "CAMERA TIMEOUT"
+                failureReasonText.text = "\uCE74\uBA54\uB77C \uC751\uB2F5\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. \uC571\uC744 \uB2E4\uC2DC \uC5F4\uC5B4 \uC8FC\uC138\uC694."
+            }
+            mainHandler.postDelayed(this, 250L)
+        }
+    }
 
     @Volatile
     private var faceLandmarkerRunner: FaceLandmarkerRunner? = null
@@ -145,8 +154,7 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
     private var profileInventoryMismatchUserIds: Set<String> = emptySet()
     private var expiredUserIds: Set<String> = emptySet()
     private var profileInventoryFailed = false
-    private var accessLockoutStorageFailed = false
-    private var auditStorageFailed = false
+    @Volatile private var auditStorageFailed = false
     private var modelAssetIntegrityFailed = false
     private var detailedMetricsVisibleUntilMs = 0L
     private var enrollmentStartedAtMs = Long.MIN_VALUE
@@ -179,13 +187,14 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
         repository = EnrollmentRepository(this)
         profileInventoryStore = EnrollmentInventoryStore(this)
         auditLogger = SecurityAuditLogger(this)
-        accessLockoutStore = AccessLockoutStore(this)
+        auditStorageFailed = !auditLogger.isHealthy()
+        // Remove the old attempt counter once; it is never read or restored.
+        deleteSharedPreferences("andface_access_lockout")
         cameraExecutor = Executors.newSingleThreadExecutor()
         analysisExecutor = Executors.newSingleThreadExecutor()
-        acceptingLiveFrames = true
+        authenticationExecutor = Executors.newSingleThreadExecutor()
 
         modelAssetIntegrityFailed = !verifyModelAssetIntegrity()
-        restorePersistedAccessLock()
         if (!reloadProfilesFromStorage()) {
             renderAuthResult(AuthResult.failed(FailureReason.SECURE_STORAGE_ERROR))
         }
@@ -211,6 +220,14 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
             updateSelectedUserUi()
         }
         updateSelectedUserUi()
+        listOf(lowerFaceHint, glassesHint, leftPatchHint, rightPatchHint).forEach { checkbox ->
+            checkbox.setOnCheckedChangeListener { _, _ ->
+                resetAuthenticationSession()
+                authDisplayStabilizer.reset()
+                authSuccessWindowController.clear()
+                if (!collectingEnrollment) renderAuthResult(AuthResult.failed(FailureReason.SESSION_RESET))
+            }
+        }
 
         if (modelAssetIntegrityFailed) {
             renderAuthResult(AuthResult.failed(FailureReason.MODEL_NOT_READY))
@@ -219,7 +236,8 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
         }
 
         cameraExecutor.execute {
-            faceLandmarkerRunner = FaceLandmarkerRunner(this, this)
+            val runner = FaceLandmarkerRunner(this, this)
+            if (activityDestroyed) runner.close() else faceLandmarkerRunner = runner
         }
         if (hasCameraPermission()) {
             startCameraWhenReady()
@@ -236,23 +254,30 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
 
     override fun onResume() {
         super.onResume()
-        acceptingLiveFrames = true
+        activityResumed = true
+        setLiveFrameAcceptance(hasWindowFocus())
         enterManagedLockTaskIfPermitted()
         if (::repository.isInitialized) handleGlobalAccessFailureIfNeeded()
     }
 
     override fun onPause() {
-        acceptingLiveFrames = false
+        activityResumed = false
+        setLiveFrameAcceptance(false)
         if (::repository.isInitialized) resetTransientAccessState(FailureReason.SESSION_RESET)
         super.onPause()
     }
 
     override fun onDestroy() {
-        acceptingLiveFrames = false
+        activityDestroyed = true
+        setLiveFrameAcceptance(false)
         clearEnrollmentTimers()
         authSuccessWindowController.clear()
-        faceLandmarkerRunner?.close()
-        faceLandmarkerRunner = null
+        // Close off the UI thread and after any initialization already queued.
+        cameraExecutor.execute {
+            faceLandmarkerRunner?.close()
+            faceLandmarkerRunner = null
+        }
+        if (::authenticationExecutor.isInitialized) authenticationExecutor.shutdown()
         if (::analysisExecutor.isInitialized) analysisExecutor.shutdown()
         if (::cameraExecutor.isInitialized) cameraExecutor.shutdown()
         super.onDestroy()
@@ -260,28 +285,32 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        acceptingLiveFrames = hasFocus
+        setLiveFrameAcceptance(hasFocus && activityResumed)
         if (!hasFocus && ::repository.isInitialized) {
-            authEngine.resetLiveSession()
+            resetAuthenticationSession()
+            authDisplayStabilizer.reset()
+            authSuccessWindowController.clear()
+            lastRenderedResult = null
             overlayView.clear()
+            if (!collectingEnrollment) renderAuthResult(AuthResult.failed(FailureReason.SESSION_RESET))
         } else if (hasFocus && ::repository.isInitialized) {
             handleGlobalAccessFailureIfNeeded()
         }
     }
 
     override fun onReady() {
-        runOnUiThread { modelStateText.text = appRevisionLabel() }
+        runOnUiThread { if (!activityDestroyed) modelStateText.text = appRevisionLabel() }
     }
 
     override fun onResults(resultBundle: FaceLandmarkerRunner.ResultBundle) {
         if (!acceptingLiveFrames) return
         val detectedFaces = resultBundle.result.faceLandmarks()
         if (detectedFaces.isEmpty()) {
-            onEmpty()
+            onEmpty(resultBundle.result.timestampMs())
             return
         }
         if (detectedFaces.size > 1) {
-            runOnUiThread { handleMultipleFaces() }
+            dispatchFrame(resultBundle.result.timestampMs(), priority = 2) { handleMultipleFaces() }
             return
         }
 
@@ -293,8 +322,8 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
             faceBlendshapes = faceBlendshapes
         )
         logFacePipelineDebug(resultBundle, candidate)
-        runOnUiThread {
-            if (!acceptingLiveFrames || handleGlobalAccessFailureIfNeeded()) return@runOnUiThread
+        dispatchFrame(resultBundle.result.timestampMs()) {
+            if (handleGlobalAccessFailureIfNeeded()) return@dispatchFrame
             renderLandmarkOverlay(
                 candidate.landmarks,
                 candidate.overlayImageWidth,
@@ -302,7 +331,7 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
             )
             val rawFrame = candidate.rawFrame
             if (rawFrame == null) {
-                authEngine.resetLiveSession()
+                resetAuthenticationSession()
                 if (collectingEnrollment) {
                     val nowMs = SystemClock.elapsedRealtime()
                     if (!abortEnrollmentIfTimedOut(nowMs)) {
@@ -320,12 +349,11 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
         }
     }
 
-    override fun onEmpty() {
+    override fun onEmpty(timestampMs: Long) {
         if (!acceptingLiveFrames) return
-        runOnUiThread {
-            if (!acceptingLiveFrames) return@runOnUiThread
+        dispatchFrame(timestampMs, priority = 1) {
             overlayView.clear()
-            if (handleGlobalAccessFailureIfNeeded()) return@runOnUiThread
+            if (handleGlobalAccessFailureIfNeeded()) return@dispatchFrame
             if (collectingEnrollment) {
                 val nowMs = SystemClock.elapsedRealtime()
                 if (enrollmentNoFaceSinceMs == 0L) enrollmentNoFaceSinceMs = nowMs
@@ -336,7 +364,7 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
                     )
                 }
             } else {
-                authEngine.resetLiveSession()
+                resetAuthenticationSession()
                 renderAuthResult(AuthResult.failed(FailureReason.NO_FACE))
             }
         }
@@ -344,9 +372,10 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
 
     override fun onError(message: String) {
         if (!acceptingLiveFrames) return
-        runOnUiThread {
-            if (!acceptingLiveFrames) return@runOnUiThread
-            authEngine.resetLiveSession()
+        val generation = authenticationGeneration.get()
+        frameDispatcher.offer(Runnable {
+            if (!acceptingLiveFrames || generation != authenticationGeneration.get()) return@Runnable
+            resetAuthenticationSession()
             modelStateText.text = "ERROR"
             if (collectingEnrollment) {
                 abortEnrollment(FailureReason.MODEL_NOT_READY, message)
@@ -354,13 +383,44 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
                 renderAuthResult(AuthResult.failed(FailureReason.MODEL_NOT_READY))
                 failureReasonText.text = message
             }
+        }, priority = 3)
+    }
+
+    private fun setLiveFrameAcceptance(accept: Boolean) {
+        if (acceptingLiveFrames == accept) return
+        acceptingLiveFrames = accept
+        authenticationGeneration.incrementAndGet()
+        frameDispatcher.clear()
+        mainHandler.removeCallbacks(streamWatchdog)
+        if (accept) {
+            liveFrameSession.start(SystemClock.uptimeMillis())
+            streamTimedOut = false
+            mainHandler.postDelayed(streamWatchdog, 250L)
+        } else {
+            liveFrameSession.stop()
         }
+    }
+
+    private fun dispatchFrame(timestampMs: Long, priority: Int = 0, action: () -> Unit) {
+        frameDispatcher.offer(Runnable {
+            if (!acceptingLiveFrames || !liveFrameSession.accept(timestampMs, SystemClock.uptimeMillis())) return@Runnable
+            if (streamTimedOut) {
+                streamTimedOut = false
+                modelStateText.text = appRevisionLabel()
+            }
+            action()
+        }, priority)
+    }
+
+    private fun resetAuthenticationSession() {
+        authenticationGeneration.incrementAndGet()
+        authEngine.resetLiveSession()
     }
 
     private fun handleMultipleFaces() {
         if (!acceptingLiveFrames || handleGlobalAccessFailureIfNeeded()) return
         overlayView.clear()
-        authEngine.resetLiveSession()
+        resetAuthenticationSession()
         if (collectingEnrollment) {
             abortEnrollment(FailureReason.MULTIPLE_FACES, "\uC5BC\uAD74\uC774 \uC5EC\uB7EC \uBA85 \uAC80\uCD9C\uB428")
         } else {
@@ -413,7 +473,7 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
         clearOcclusionHintsForEnrollment()
         authDisplayStabilizer.reset()
         enrollmentSamples.clear()
-        authEngine.resetLiveSession()
+        resetAuthenticationSession()
         collectingEnrollment = true
         enrollmentStartedAtMs = SystemClock.elapsedRealtime()
         enrollmentNoFaceSinceMs = 0L
@@ -436,7 +496,7 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
         enrollmentSamples.clear()
         collectingEnrollment = false
         clearEnrollmentTimers()
-        authEngine.resetLiveSession()
+        resetAuthenticationSession()
         registerButton.isEnabled = true
         setUserSelectionEnabled(true)
         setOcclusionHintsEnabled(true)
@@ -544,6 +604,7 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
         val healthy = storageFailedUserIds.isEmpty() &&
             !profileInventoryFailed &&
             profileInventoryMismatchUserIds.isEmpty()
+        authenticationGeneration.incrementAndGet()
         authEngine.setProfiles(if (healthy) activeProfiles else emptyList())
         if (expiredUserIds.isNotEmpty()) {
             auditLogger.recordProfilesExpired(expiredUserIds, activeProfiles.size)
@@ -568,14 +629,42 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
             handleEnrollmentFrame(rawFrame, hint)
             return
         }
-        val result = if (authEngine.profiles.isEmpty() && expiredUserIds.isNotEmpty()) {
-            AuthResult.failed(FailureReason.PROFILE_EXPIRED).copy(registeredUserCount = expiredUserIds.size)
-        } else {
-            authEngine.authenticate(rawFrame, hint)
+        if (authEngine.profiles.isEmpty() && expiredUserIds.isNotEmpty()) {
+            renderAuthResult(AuthResult.failed(FailureReason.PROFILE_EXPIRED).copy(registeredUserCount = expiredUserIds.size))
+            return
         }
-        logAuthDecisionDebug(result)
-        recordAuthenticationAudit(result)
-        renderAuthResult(result)
+        if (!authenticationInFlight.compareAndSet(false, true)) return
+        val generation = authenticationGeneration.get()
+        authenticationExecutor.execute {
+            val result = try {
+                synchronized(authEngine) {
+                    if (generation != authenticationGeneration.get()) null
+                    else authEngine.authenticate(rawFrame, hint)
+                }
+            } catch (error: RuntimeException) {
+                synchronized(authEngine) { authEngine.resetLiveSession() }
+                AuthResult.failed(FailureReason.MODEL_NOT_READY)
+            }
+            if (result != null && generation == authenticationGeneration.get() &&
+                SystemClock.uptimeMillis() - rawFrame.timestampMs <= 750L
+            ) recordAuthenticationAudit(result)
+            mainHandler.post {
+                try {
+                    if (result != null && acceptingLiveFrames && !activityDestroyed &&
+                        generation == authenticationGeneration.get()
+                    ) {
+                        if (SystemClock.uptimeMillis() - rawFrame.timestampMs > 750L) {
+                            resetTransientAccessState(FailureReason.MODEL_NOT_READY)
+                        } else if (!handleGlobalAccessFailureIfNeeded()) {
+                            logAuthDecisionDebug(result, rawFrame)
+                            renderAuthResult(result)
+                        }
+                    }
+                } finally {
+                    authenticationInFlight.set(false)
+                }
+            }
+        }
     }
 
     private fun handleEnrollmentFrame(rawFrame: RawFeatureFrame, hint: OcclusionHint) {
@@ -636,17 +725,24 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
             abortEnrollment(separationFailure, displayFailureReason(separationFailure))
             return
         }
-        if (!repository.saveProfile(profile)) {
-            abortEnrollment(FailureReason.SECURE_STORAGE_ERROR, "\uB4F1\uB85D \uC800\uC7A5 \uC2E4\uD328")
+        val previous = repository.loadProfileResult(profile.userId)
+        if (previous.storageError) {
+            abortEnrollment(FailureReason.SECURE_STORAGE_ERROR, "기존 등록 정보를 읽을 수 없습니다")
             return
         }
-        if (!auditLogger.recordEnrollmentCompleted(profile.userId, profile.sampleCount)) {
-            repository.clear(profile.userId)
-            abortEnrollment(FailureReason.SECURE_STORAGE_ERROR, "\uAC10\uC0AC \uB85C\uADF8 \uC800\uC7A5 \uC2E4\uD328")
-            return
-        }
-        if (!saveProfileInventoryFromStorage() || !reloadProfilesFromStorage()) {
-            abortEnrollment(FailureReason.SECURE_STORAGE_ERROR, "\uB4F1\uB85D \uBAA9\uB85D \uAC80\uC99D \uC2E4\uD328")
+        val committed = EnrollmentCommitter(
+            writeProfile = { value ->
+                if (value == null) repository.clear(profile.userId) else repository.saveProfile(value)
+            },
+            writeInventory = { saveProfileInventoryFromStorage() },
+            recordCompletion = { value ->
+                auditLogger.recordEnrollmentCompleted(value.userId, value.sampleCount)
+            }
+        ).commit(previous.profile, profile)
+        if (!committed || !reloadProfilesFromStorage()) {
+            auditStorageFailed = true
+            resetAuthenticationSession()
+            abortEnrollment(FailureReason.SECURE_STORAGE_ERROR, "등록 저장 또는 검증 실패")
             return
         }
         enrollmentSamples.clear()
@@ -726,7 +822,7 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
         enrollmentSamples.clear()
         collectingEnrollment = false
         clearEnrollmentTimers()
-        authEngine.resetLiveSession()
+        resetAuthenticationSession()
         registerButton.isEnabled = true
         setUserSelectionEnabled(true)
         setOcclusionHintsEnabled(true)
@@ -805,7 +901,7 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
         imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
             logAnalyzerFrame(imageProxy)
             val runner = faceLandmarkerRunner
-            if (runner == null) {
+            if (runner == null || !acceptingLiveFrames) {
                 imageProxy.close()
             } else {
                 runner.detectLiveStream(
@@ -840,6 +936,8 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
             authSuccessWindowController.show(result.matchedUserId)?.let { window ->
                 if (!auditLogger.recordAuthSuccessWindowShown(window)) {
                     auditStorageFailed = true
+                    handleGlobalAccessFailureIfNeeded()
+                    return
                 }
             }
         } else if (!success) {
@@ -1117,11 +1215,32 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
         )
     }
 
-    private fun logAuthDecisionDebug(result: AuthResult) {
+    private fun logAuthDecisionDebug(result: AuthResult, rawFrame: RawFeatureFrame) {
         if (!BuildConfig.DEBUG) return
         val nowMs = SystemClock.elapsedRealtime()
         if (nowMs - lastAuthDecisionDebugAtMs < FACE_PIPELINE_DEBUG_INTERVAL_MS) return
         lastAuthDecisionDebugAtMs = nowMs
+        authEngine.profiles.firstOrNull { it.userId == result.matchedUserId }?.let { profile ->
+            val diagnosticTypes = listOf(
+                FeatureType.EyeDistance, FeatureType.FaceAspect,
+                FeatureType.LeftBrowNoseRoot, FeatureType.RightBrowNoseRoot,
+                FeatureType.LeftTempleBrowDistance, FeatureType.RightTempleBrowDistance,
+                FeatureType.LeftEyeForeheadDistance, FeatureType.RightEyeForeheadDistance
+            )
+            val deviations = dev.andface.galaxy.occlusion.OcclusionAnalyzer()
+                .analyzeResolved(rawFrame, profile, currentHint()).observableEvidence
+                .map { evidence -> evidence.type to ((evidence.value - profile.mean(evidence.type)) /
+                    maxOf(profile.sigma(evidence.type), evidence.type.minimumSigma)) }
+                .sortedByDescending { kotlin.math.abs(it.second) }.take(10)
+            Log.d("AndFaceGeometry", "outliers=" + deviations.joinToString(" ") { (type, deviation) ->
+                "%s:z=%.2f".format(Locale.US, type.label, deviation)
+            })
+            Log.d("AndFaceGeometry", diagnosticTypes.joinToString(" ") { type ->
+                val center = profile.mean(type)
+                val ratio = if (kotlin.math.abs(center) > 1e-6) rawFrame.value(type) / center else 0.0
+                "%s:ratio=%.3f".format(Locale.US, type.label, ratio)
+            })
+        }
         Log.d(
             AUTH_DECISION_DEBUG_TAG,
             String.format(
@@ -1223,7 +1342,7 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
     private fun resetTransientAccessState(reason: FailureReason) {
         lastRenderedResult = null
         detailedMetricsVisibleUntilMs = 0L
-        authEngine.resetLiveSession()
+        resetAuthenticationSession()
         authDisplayStabilizer.reset()
         authSuccessWindowController.clear()
         if (::overlayView.isInitialized) overlayView.clear()
@@ -1300,7 +1419,6 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
         FailureReason.LOW_GLOBAL_CONSISTENCY -> "\uC804\uC5ED \uC77C\uAD00\uC131 \uBD80\uC871"
         FailureReason.EXCESSIVE_OCCLUSION -> "\uAC00\uB9BC\uC774 \uB108\uBB34 \uB9CE\uC74C"
         FailureReason.OCCLUSION_HINT_MISMATCH -> "\uAC00\uB9BC \uC120\uD0DD\uACFC \uC2E4\uC81C \uC0C1\uD0DC \uBD88\uC77C\uCE58"
-        FailureReason.TOO_MANY_ATTEMPTS -> "\uC2DC\uB3C4 \uD69F\uC218 \uCD08\uACFC"
         FailureReason.UNSTABLE_DECISION -> "\uC778\uC99D \uD655\uC778 \uC911"
         FailureReason.SESSION_RESET -> "\uC778\uC99D \uC138\uC158 \uCD08\uAE30\uD654"
         FailureReason.LOW_SCORE -> "\uC810\uC218 \uBD80\uC871"
@@ -1341,14 +1459,13 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
 
     private fun renderCameraPermissionFailure() {
         authSuccessWindowController.clear()
-        authEngine.resetLiveSession()
+        resetAuthenticationSession()
         overlayView.clear()
         renderAuthResult(AuthResult.failed(FailureReason.MODEL_NOT_READY))
         failureReasonText.text = "\uCE74\uBA54\uB77C \uAD8C\uD55C\uC774 \uD544\uC694\uD569\uB2C8\uB2E4."
     }
 
     private fun configureSecureWindow() {
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             window.setHideOverlayWindows(true)
         }
@@ -1356,7 +1473,7 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
 
     private fun handleGlobalAccessFailureIfNeeded(): Boolean {
         val failure = activeGlobalAccessFailure() ?: return false
-        authEngine.resetLiveSession()
+        resetAuthenticationSession()
         authDisplayStabilizer.reset()
         authSuccessWindowController.clear()
         if (::overlayView.isInitialized) overlayView.clear()
@@ -1370,7 +1487,7 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
         if (storageFailedUserIds.isNotEmpty() || profileInventoryFailed || profileInventoryMismatchUserIds.isNotEmpty()) {
             return FailureReason.SECURE_STORAGE_ERROR
         }
-        if (accessLockoutStorageFailed || auditStorageFailed) return FailureReason.SECURE_STORAGE_ERROR
+        if (auditStorageFailed) return FailureReason.SECURE_STORAGE_ERROR
         if (!BuildConfig.DEBUG) {
             if (!isDeviceSecureForAccess()) return FailureReason.DEVICE_NOT_SECURE
             if (!isDeviceUnlockedForAccess()) return FailureReason.DEVICE_LOCKED
@@ -1409,15 +1526,6 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
             startLockTask()
             true
         }.getOrDefault(false)
-    }
-
-    private fun restorePersistedAccessLock() {
-        val lock = accessLockoutStore.restoreActive()
-        accessLockoutStorageFailed = lock.storageError
-        lock.untilElapsedMs?.let(authEngine::restoreAccessLock)
-        val risky = accessLockoutStore.restoreRiskyFailureWindow()
-        accessLockoutStorageFailed = accessLockoutStorageFailed || risky.storageError
-        risky.state?.let(authEngine::restoreRiskyFailureState)
     }
 
     private fun verifyModelAssetIntegrity(): Boolean {

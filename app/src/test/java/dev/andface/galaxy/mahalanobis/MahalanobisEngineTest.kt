@@ -122,6 +122,36 @@ class MahalanobisEngineTest {
             lowVisibility.score > fullVisibility.score
         )
     }
+    @Test
+    fun indefiniteCovarianceCannotTurnAnOutlierIntoAPerfectMatch() {
+        val profile = profileWithIdentityCovariance().copy(sampleCount = 10000)
+        val types = listOf(FeatureType.EyeDistance, FeatureType.NoseWidth, FeatureType.BrowDistance)
+        for (i in types.indices) for (j in types.indices) {
+            profile.covariance[types[i].ordinal][types[j].ordinal] = when {
+                i == j -> 0.01
+                (i == 1 && j == 2) || (i == 2 && j == 1) -> -0.01
+                else -> 0.01
+            }
+        }
+        val evidence = types.mapIndexed { i, type ->
+            FeatureEvidence(type, profile.mean(type) + if (i == 0) -1.0 else 1.0, 1.0, true)
+        }
+        val result = engine.score(profile, evidence)
+        assertTrue(result.usedDiagonalFallback)
+        assertTrue(result.distance > 0.0)
+        assertTrue(result.score < 0.01)
+    }
+
+    @Test
+    fun nonFiniteMeasurementFailsClosed() {
+        for (value in listOf(Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY)) {
+            val result = engine.score(profileWithIdentityCovariance(), listOf(
+                FeatureEvidence(FeatureType.EyeDistance, value, 1.0, true)
+            ))
+            assertEquals(0.0, result.score, 0.0)
+        }
+    }
+
     private fun profileWithIdentityCovariance(): EnrollmentProfile {
         val means = DoubleArray(FeatureType.COUNT) { index -> 0.1 + index * 0.01 }
         val variance = 0.05 * 0.05

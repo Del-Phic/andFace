@@ -12,6 +12,25 @@ import org.junit.Test
 
 class LivenessTrackerTest {
     @Test
+    fun repeatedTimestampCannotAccumulateChallengeEvidence() {
+        val tracker = LivenessTracker()
+        val results = challengeCompletingFrames().map { tracker.add(it.copy(timestampMs = 1000L)) }
+        assertTrue(results.none { it.passed })
+        assertEquals(1, results.last().frameCount)
+    }
+
+    @Test
+    fun longGapAndOutOfOrderFrameResetLiveness() {
+        val tracker = LivenessTracker()
+        val frames = challengeCompletingFrames()
+        assertTrue(frames.map { tracker.add(it) }.last().passed)
+        val afterGap = tracker.add(frames.last().copy(timestampMs = 10000L))
+        assertFalse(afterGap.passed)
+        assertEquals(1, afterGap.frameCount)
+        assertEquals(1, tracker.add(frames.first()).frameCount)
+    }
+
+    @Test
     fun staticFaceDoesNotPassLivenessEvenAfterWindowIsFull() {
         val tracker = LivenessTracker()
 

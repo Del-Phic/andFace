@@ -14,17 +14,12 @@ import javax.crypto.spec.GCMParameterSpec
 
 class SecureProfileCodec private constructor(
     private val keyAlias: String,
-    private val fallbackKeyAliases: List<String> = emptyList(),
-    private val regenerateKeyOnProtectFailure: Boolean = false
+    private val fallbackKeyAliases: List<String> = emptyList()
 ) {
     fun protect(plainJson: String): String {
-        return runCatching {
-            protectWithKey(plainJson, getOrCreateKey(keyAlias))
-        }.getOrElse { error ->
-            if (!regenerateKeyOnProtectFailure) throw error
-            deleteKey(keyAlias)
-            protectWithKey(plainJson, getOrCreateKey(keyAlias))
-        }
+        // A transient/locked Keystore error must never delete a shared key and
+        // make every existing profile, lockout or audit record unreadable.
+        return protectWithKey(plainJson, getOrCreateKey(keyAlias))
     }
 
     private fun protectWithKey(plainJson: String, key: SecretKey): String {
@@ -99,15 +94,6 @@ class SecureProfileCodec private constructor(
         return keyStore.getKey(alias, null) as? SecretKey
     }
 
-    private fun deleteKey(alias: String) {
-        runCatching {
-            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-            if (keyStore.containsAlias(alias)) {
-                keyStore.deleteEntry(alias)
-            }
-        }
-    }
-
     private fun getOrCreateKey(alias: String): SecretKey {
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         val existingKey = keyStore.getKey(alias, null) as? SecretKey
@@ -152,16 +138,14 @@ class SecureProfileCodec private constructor(
         fun enrollmentProfiles(): SecureProfileCodec {
             return SecureProfileCodec(
                 keyAlias = PROFILE_KEY_ALIAS,
-                fallbackKeyAliases = listOf(PROFILE_KEY_ALIAS_V1),
-                regenerateKeyOnProtectFailure = true
+                fallbackKeyAliases = listOf(PROFILE_KEY_ALIAS_V1)
             )
         }
 
         fun auditLog(): SecureProfileCodec {
             return SecureProfileCodec(
                 keyAlias = AUDIT_LOG_KEY_ALIAS,
-                fallbackKeyAliases = listOf(AUDIT_LOG_KEY_ALIAS_V1, PROFILE_KEY_ALIAS_V1),
-                regenerateKeyOnProtectFailure = true
+                fallbackKeyAliases = listOf(AUDIT_LOG_KEY_ALIAS_V1, PROFILE_KEY_ALIAS_V1)
             )
         }
     }

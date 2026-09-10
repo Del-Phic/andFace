@@ -16,7 +16,7 @@ class MediaPipeCameraIntegrationContractTest {
         assertTrue(source.contains(".setResultListener(this::onResult)"))
         assertTrue(source.contains(".setErrorListener(this::onError)"))
         assertTrue(source.contains("runner.detectAsync(mpImage, processingOptions, frameTimeMs)"))
-        assertTrue(source.contains("listener.onEmpty()"))
+        assertTrue(source.contains("listener.onEmpty(result.timestampMs())"))
         assertTrue(source.contains("BitmapImageBuilder(bitmap).build()"))
         assertTrue(source.contains("ImageProcessingOptions.builder()"))
         assertTrue(source.contains("imageProxy.imageInfo.rotationDegrees"))

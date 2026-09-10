@@ -23,7 +23,9 @@ class FaceLandmarkerRunner(
     private val appContext = context.applicationContext
     private var faceLandmarker: FaceLandmarker? = null
     private val frameInFlight = AtomicBoolean(false)
-    private val pendingFrames = ConcurrentHashMap<Long, ImageProxy>()
+    private val pendingFrames = ConcurrentHashMap<Long, MPImage>()
+    @Volatile private var closed = false
+    private var lastSubmittedTimestampMs = Long.MIN_VALUE
     private val pendingRotations = ConcurrentHashMap<Long, Int>()
     private var lastEmptyDebugAtMs = 0L
     private var lastFrameDebugAtMs = 0L
@@ -35,45 +37,58 @@ class FaceLandmarkerRunner(
     }
 
     fun close() {
-        pendingFrames.values.forEach { proxy -> proxy.close() }
-        pendingFrames.clear()
-        pendingRotations.clear()
-        frameInFlight.set(false)
-        faceLandmarker?.close()
-        faceLandmarker = null
+        // Serialize detachment with submission; never hold this monitor while
+        // native close waits for callback completion.
+        val runner = synchronized(this) {
+            if (closed) return
+            closed = true
+            faceLandmarker.also { faceLandmarker = null }
+        }
+        try {
+            runner?.close()
+        } finally {
+            closeAllPendingFrames()
+            frameInFlight.set(false)
+        }
     }
 
+    @Synchronized
     fun detectLiveStream(imageProxy: ImageProxy, isFrontCamera: Boolean) {
         val runner = faceLandmarker
-        if (runner == null) {
-            imageProxy.close()
-            listener.onError("Face Landmarker is not ready.")
-            return
-        }
-        if (!frameInFlight.compareAndSet(false, true)) {
+        if (closed || runner == null || !frameInFlight.compareAndSet(false, true)) {
             imageProxy.close()
             return
         }
-
-        val frameTimeMs = SystemClock.uptimeMillis()
-        val frameRotation = imageProxy.imageInfo.rotationDegrees
-        val mediaPipeRotation = 0
-        pendingFrames[frameTimeMs] = imageProxy
-        pendingRotations[frameTimeMs] = mediaPipeRotation
-
+        val frameTimeMs = maxOf(SystemClock.uptimeMillis(), lastSubmittedTimestampMs + 1L)
+        lastSubmittedTimestampMs = frameTimeMs
+        var unownedBitmap: Bitmap? = null
         try {
-            val bitmap = imageProxy.toBitmap().rotateForMediaPipe(frameRotation)
+            val frameRotation: Int
+            val bitmap: Bitmap
+            try {
+                frameRotation = imageProxy.imageInfo.rotationDegrees
+                bitmap = imageProxy.toBitmap().rotateForMediaPipe(frameRotation)
+            } finally {
+                // The bitmap owns a copy; release CameraX before async inference.
+                imageProxy.close()
+            }
+            unownedBitmap = bitmap
             val mpImage = BitmapImageBuilder(bitmap).build()
+            pendingFrames[frameTimeMs] = mpImage
+            unownedBitmap = null
+            val mediaPipeRotation = 0
+            pendingRotations[frameTimeMs] = mediaPipeRotation
             val processingOptions = ImageProcessingOptions.builder()
                 .setRotationDegrees(mediaPipeRotation)
                 .build()
             logFrameSubmitted(frameTimeMs, bitmap.width, bitmap.height, frameRotation, mediaPipeRotation, isFrontCamera)
             runner.detectAsync(mpImage, processingOptions, frameTimeMs)
         } catch (error: RuntimeException) {
+            unownedBitmap?.recycle()
             closePendingFrame(frameTimeMs)
             frameInFlight.set(false)
             logFrameError("MediaPipe detectAsync failed: ${error.message}")
-            listener.onError(error.message ?: "MediaPipe detectAsync failed.")
+            if (!closed) listener.onError(error.message ?: "MediaPipe detectAsync failed.")
         }
     }
 
@@ -104,31 +119,36 @@ class FaceLandmarkerRunner(
     }
 
     private fun onResult(result: FaceLandmarkerResult, input: MPImage) {
-        val imageRotationDegrees = pendingRotations[result.timestampMs()] ?: 0
-        closePendingFrame(result.timestampMs())
-        frameInFlight.set(false)
-        if (result.faceLandmarks().isEmpty()) {
-            logEmptyResult(input)
-            listener.onEmpty()
-            return
-        }
-        logResult(input, result)
-        val inferenceTimeMs = SystemClock.uptimeMillis() - result.timestampMs()
-        listener.onResults(
-            ResultBundle(
-                result = result,
-                inferenceTimeMs = inferenceTimeMs,
-                inputImageWidth = input.width,
-                inputImageHeight = input.height,
-                inputRotationDegrees = imageRotationDegrees
+        val ownedImage = pendingFrames.remove(result.timestampMs()) ?: return
+        val imageRotationDegrees = pendingRotations.remove(result.timestampMs()) ?: 0
+        try {
+            if (closed) return
+            if (result.faceLandmarks().isEmpty()) {
+                logEmptyResult(input)
+                listener.onEmpty(result.timestampMs())
+                return
+            }
+            logResult(input, result)
+            val inferenceTimeMs = (SystemClock.uptimeMillis() - result.timestampMs()).coerceAtLeast(0L)
+            listener.onResults(
+                ResultBundle(
+                    result = result,
+                    inferenceTimeMs = inferenceTimeMs,
+                    inputImageWidth = input.width,
+                    inputImageHeight = input.height,
+                    inputRotationDegrees = imageRotationDegrees
+                )
             )
-        )
+        } finally {
+            ownedImage.close()
+            frameInFlight.set(false)
+        }
     }
 
     private fun onError(error: RuntimeException) {
         closeAllPendingFrames()
         frameInFlight.set(false)
-        listener.onError(error.message ?: "MediaPipe Face Landmarker runtime error.")
+        if (!closed) listener.onError(error.message ?: "MediaPipe Face Landmarker runtime error.")
     }
 
     private fun closePendingFrame(timestampMs: Long) {
@@ -137,8 +157,7 @@ class FaceLandmarkerRunner(
     }
 
     private fun closeAllPendingFrames() {
-        pendingFrames.values.forEach { proxy -> proxy.close() }
-        pendingFrames.clear()
+        pendingFrames.keys.toList().forEach(::closePendingFrame)
         pendingRotations.clear()
     }
 
@@ -146,7 +165,14 @@ class FaceLandmarkerRunner(
         val normalized = ((rotationDegrees % 360) + 360) % 360
         if (normalized == 0) return this
         val matrix = Matrix().apply { postRotate(normalized.toFloat()) }
-        return Bitmap.createBitmap(this, 0, 0, width, height, matrix, true)
+        return try {
+            Bitmap.createBitmap(this, 0, 0, width, height, matrix, true).also { rotated ->
+                if (rotated !== this) recycle()
+            }
+        } catch (error: RuntimeException) {
+            recycle()
+            throw error
+        }
     }
 
     private fun logFrameSubmitted(timestampMs: Long, width: Int, height: Int, frameRotation: Int, mediaPipeRotation: Int, front: Boolean) {
@@ -188,7 +214,7 @@ class FaceLandmarkerRunner(
     interface Listener {
         fun onReady()
         fun onResults(resultBundle: ResultBundle)
-        fun onEmpty()
+        fun onEmpty(timestampMs: Long)
         fun onError(message: String)
     }
 

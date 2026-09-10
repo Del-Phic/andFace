@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
+import android.util.Log
 import dev.andface.galaxy.BuildConfig
 import dev.andface.galaxy.auth.AuthDecision
 import dev.andface.galaxy.auth.AuthResult
@@ -21,9 +22,17 @@ class SecurityAuditLogger(context: Context) {
     private val preferences = appContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
     private val secureCodec = SecureProfileCodec.auditLog()
 
-    fun isHealthy(): Boolean = true
+    private val journal = AuditEventJournal(
+        read = ::loadEvents,
+        write = ::persistEvents,
+        wallClockMs = System::currentTimeMillis,
+        elapsedClockMs = SystemClock::elapsedRealtime,
+        maxEvents = MAX_EVENTS
+    )
 
-    fun latestEventWallClockMs(): Long? = null
+    fun isHealthy(): Boolean = journal.isHealthy()
+
+    fun latestEventWallClockMs(): Long? = journal.latestEventWallClockMs()
 
     fun recordAuthentication(result: AuthResult): Boolean {
         return append(
@@ -122,37 +131,8 @@ class SecurityAuditLogger(context: Context) {
         )
     }
 
-    private fun append(eventType: String, fields: JSONObject): Boolean = true
-
-    private fun appendAfterAuditLogReset(eventType: String, fields: JSONObject, error: Throwable): Boolean {
-        return runCatching {
-            val recovered = auditLogRecoveredEvents(eventType, error)
-            val appended = AuditChain.append(
-                events = recovered,
-                eventType = eventType,
-                fields = fields.withAuditMetadata(),
-                timestampMs = System.currentTimeMillis()
-            )
-            persistEvents(AuditChain.trim(appended, MAX_EVENTS))
-        }.getOrDefault(false)
-    }
-
-    private fun recoverAuditLogAfterLoadFailure(recoveredEventType: String, error: Throwable): Boolean {
-        return runCatching {
-            persistEvents(AuditChain.trim(auditLogRecoveredEvents(recoveredEventType, error), MAX_EVENTS))
-        }.getOrDefault(false)
-    }
-
-    private fun auditLogRecoveredEvents(recoveredEventType: String, error: Throwable): JSONArray {
-        return AuditChain.append(
-            events = JSONArray(),
-            eventType = "AUDIT_LOG_RECOVERED",
-            fields = JSONObject()
-                .put("reason", error::class.java.simpleName ?: "Unknown")
-                .put("recoveredEventType", recoveredEventType)
-                .withAuditMetadata(),
-            timestampMs = System.currentTimeMillis()
-        )
+    private fun append(eventType: String, fields: JSONObject): Boolean {
+        return journal.append(eventType, fields.withAuditMetadata())
     }
 
     private fun persistEvents(events: JSONArray): Boolean {
@@ -196,7 +176,12 @@ class SecurityAuditLogger(context: Context) {
 
     private fun loadEvents(): JSONArray {
         val stored = preferences.getString(AUDIT_EVENTS_KEY, null) ?: return JSONArray()
-        return AuditChain.validateOrMigrate(JSONArray(secureCodec.unprotect(stored)))
+        return try {
+            AuditChain.validateOrMigrate(JSONArray(secureCodec.unprotect(stored)))
+        } catch (error: Exception) {
+            Log.w("AndFaceStorage", "audit_read_failed=${error.javaClass.simpleName}")
+            throw error
+        }
     }
 
     private fun validateAndReprotectEventsIfNeeded(): Boolean {

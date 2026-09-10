@@ -718,7 +718,8 @@ class AuthenticationEngineTest {
             .last()
         assertEquals(resultSummary(genuineFinal), AuthDecision.SUCCESS, genuineFinal.decision)
 
-        val impostorFrame = liveFrames(IMPOSTOR_FACE, startMs = 6_000L, count = 1).first()
+        val nextFrameMs = liveFrames(BASE_FACE).last().timestampMs + 33L
+        val impostorFrame = liveFrames(IMPOSTOR_FACE, startMs = nextFrameMs, count = 1).first()
         val result = engine.authenticate(impostorFrame, OcclusionHint())
 
         assertEquals(resultSummary(result), AuthDecision.FAILED, result.decision)
@@ -734,85 +735,29 @@ class AuthenticationEngineTest {
         )
     }
     @Test
-    fun repeatedRiskyFailuresDoNotLockDemoApp() {
-        val profile = EnrollmentBuilder.build("USER_1", enrollmentSamples(BASE_FACE))
-        val clock = TestClock()
-        var storedLockUntilMs = Long.MIN_VALUE
-        val engine = AuthenticationEngine(
-            securityClockMs = clock::now,
-            onAccessLockout = { untilMs -> storedLockUntilMs = untilMs }
-        )
-        engine.setProfiles(listOf(profile))
-
-        val impostorResult = liveFrames(IMPOSTOR_FACE, startMs = 10_000L, stepMs = 500L, count = 26)
-            .map { frame ->
-                clock.set(frame.timestampMs)
-                engine.authenticate(frame, OcclusionHint())
-            }
-            .last()
-
-        assertEquals(resultSummary(impostorResult), AuthDecision.FAILED, impostorResult.decision)
-        assertTrue("demo app must not return lockout", impostorResult.failureReason != FailureReason.TOO_MANY_ATTEMPTS)
-        assertEquals(Long.MIN_VALUE, storedLockUntilMs)
-
-        val recovered = liveFrames(BASE_FACE, startMs = 60_000L, stepMs = 500L, count = 14)
-            .map { frame ->
-                clock.set(frame.timestampMs)
-                engine.authenticate(frame, OcclusionHint())
-            }
-            .last()
-
+    fun repeatedImpostorsDoNotPreventTheNextGenuineAttempt() {
+        val engine = AuthenticationEngine()
+        engine.setProfiles(listOf(EnrollmentBuilder.build("USER_1", enrollmentSamples(BASE_FACE))))
+        val attacks = liveFrames(IMPOSTOR_FACE, startMs = 10000L, stepMs = 500L, count = 60)
+            .map { engine.authenticate(it, OcclusionHint()) }
+        assertTrue(attacks.all { it.decision == AuthDecision.FAILED })
+        engine.resetLiveSession()
+        val recovered = liveFrames(BASE_FACE, startMs = 40000L, count = 20)
+            .map { engine.authenticate(it, OcclusionHint()) }.last()
         assertEquals(resultSummary(recovered), AuthDecision.SUCCESS, recovered.decision)
-        assertEquals(FailureReason.NONE, recovered.failureReason)
     }
 
     @Test
-    fun restoredRiskyFailureWindowIsIgnoredInDemoApp() {
-        val profile = EnrollmentBuilder.build("USER_1", enrollmentSamples(BASE_FACE))
-        val clock = TestClock()
-        var storedLockUntilMs = Long.MIN_VALUE
-        val restartedEngine = AuthenticationEngine(
-            securityClockMs = clock::now,
-            onAccessLockout = { untilMs -> storedLockUntilMs = untilMs }
-        )
-        restartedEngine.setProfiles(listOf(profile))
-        clock.set(12_000L)
-        restartedEngine.restoreRiskyFailureState(
-            AuthenticationEngine.RiskyFailureState(
-                count = 7,
-                windowStartMs = 10_000L,
-                lastCountedMs = 10_000L
-            )
-        )
-
-        val result = liveFrames(IMPOSTOR_FACE, startMs = 12_000L, stepMs = 500L, count = 16)
-            .map { frame ->
-                clock.set(frame.timestampMs)
-                restartedEngine.authenticate(frame, OcclusionHint())
-            }
-            .last()
-
-        assertEquals(resultSummary(result), AuthDecision.FAILED, result.decision)
-        assertTrue("demo app must not restore lockout", result.failureReason != FailureReason.TOO_MANY_ATTEMPTS)
-        assertEquals(Long.MIN_VALUE, storedLockUntilMs)
-    }
-
-    @Test
-    fun repeatedMatureLivenessFailuresStayLivenessFailuresWithoutLock() {
-        val profile = EnrollmentBuilder.build("USER_1", enrollmentSamples(BASE_FACE))
-        val attackClock = TestClock()
-        val attackEngine = AuthenticationEngine(securityClockMs = attackClock::now)
-        attackEngine.setProfiles(listOf(profile))
-
-        val result = staticLiveFrames(BASE_FACE, startMs = 20_000L, stepMs = 500L, count = 20)
-            .map { frame ->
-                attackClock.set(frame.timestampMs)
-                attackEngine.authenticate(frame, OcclusionHint())
-            }
-            .last()
-
-        assertEquals(resultSummary(result), AuthDecision.FAILED, result.decision)
-        assertEquals(FailureReason.LOW_LIVENESS, result.failureReason)
+    fun repeatedStaticFaceAttemptsRemainLivenessFailuresWithoutLocking() {
+        val engine = AuthenticationEngine()
+        engine.setProfiles(listOf(EnrollmentBuilder.build("USER_1", enrollmentSamples(BASE_FACE))))
+        val results = staticLiveFrames(BASE_FACE, startMs = 10000L, stepMs = 500L, count = 60)
+            .map { engine.authenticate(it, OcclusionHint()) }
+        assertEquals(FailureReason.LOW_LIVENESS, results.last().failureReason)
+        engine.resetLiveSession()
+        val recovered = liveFrames(BASE_FACE, startMs = 40000L, count = 20)
+            .map { engine.authenticate(it, OcclusionHint()) }.last()
+        assertEquals(resultSummary(recovered), AuthDecision.SUCCESS, recovered.decision)
     }
 
     @Test

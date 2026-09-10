@@ -5,8 +5,8 @@ package dev.andface.galaxy.auth
  *
  * A frame-level SUCCESS is intentionally not considered complete immediately. The same
  * identity must keep producing SUCCESS for [COMPLETION_CONFIRM_MS]. Once complete, the
- * successful result is latched across missing/low-quality frames and is refreshed often
- * enough to keep MainActivity's legacy visibility timer alive. Strong identity disagreement,
+ * successful result survives missing/low-quality frames for at most [successHoldMs]
+ * since the last real success. Refreshing the display never renews that deadline. Strong identity disagreement,
  * a different successful identity, or an unsafe system/occlusion state releases the latch.
  */
 internal class AuthDisplayStabilizer(
@@ -32,14 +32,22 @@ internal class AuthDisplayStabilizer(
 
     fun stabilize(incoming: AuthResult): AuthResult? {
         val nowMs = clockMs()
+        if (completedSuccess != null &&
+            (nowMs < lastSuccessAtMs || nowMs - lastSuccessAtMs >= successHoldMs)
+        ) {
+            clearCompletion()
+            displayedResult = null
+            if (incoming.decision != AuthDecision.SUCCESS) {
+                clearQualification()
+                return accept(incoming, nowMs)
+            }
+        }
         if (incoming.decision == AuthDecision.SUCCESS) {
             return stabilizeSuccess(incoming, nowMs)
         }
 
-        val isSameIdentityNearMiss = incoming.failureReason in IDENTITY_FAILURES &&
-            incoming.matchedUserId == qualifyingUserId
         if (qualifyingUserId != null &&
-            (incoming.failureReason in QUALIFICATION_TRANSIENT_FAILURES || isSameIdentityNearMiss) &&
+            incoming.failureReason in QUALIFICATION_TRANSIENT_FAILURES &&
             qualificationLastSuccessAtMs != Long.MIN_VALUE &&
             nowMs - qualificationLastSuccessAtMs <= QUALIFICATION_TRANSIENT_GRACE_MS
         ) {
@@ -136,19 +144,11 @@ internal class AuthDisplayStabilizer(
             return accept(incoming, nowMs)
         }
 
+        // An identity rejection is not camera jitter. Never display the
+        // previous user's success over a current identity mismatch.
         if (incoming.failureReason in IDENTITY_FAILURES) {
-            completedIdentityFailureFrames += 1
-            val requiredFrames = if (incoming.occlusionSummary == "clean") {
-                identityFailureFrameThreshold
-            } else {
-                maxOf(identityFailureFrameThreshold, transientFailureFrameThreshold)
-            }
-            if (completedIdentityFailureFrames >= requiredFrames) {
-                clearCompletion()
-                return accept(incoming, nowMs)
-            }
-        } else {
-            completedIdentityFailureFrames = 0
+            clearCompletion()
+            return accept(incoming, nowMs)
         }
 
         if (lastRenderedAtMs != Long.MIN_VALUE && nowMs - lastRenderedAtMs < successRefreshMs) {
@@ -239,7 +239,7 @@ internal class AuthDisplayStabilizer(
 
     companion object {
         private const val COMPLETION_CONFIRM_MS = 2_000L
-        private const val QUALIFICATION_TRANSIENT_GRACE_MS = 2_500L
+        private const val QUALIFICATION_TRANSIENT_GRACE_MS = 500L
         private const val MIN_QUALIFICATION_SUCCESS_FRAMES = 3
         private const val DEFAULT_SUCCESS_HOLD_MS = 1_500L
         private const val DEFAULT_SUCCESS_REFRESH_MS = 800L
@@ -282,7 +282,6 @@ internal class AuthDisplayStabilizer(
             FailureReason.SECURE_STORAGE_ERROR,
             FailureReason.EXCESSIVE_OCCLUSION,
             FailureReason.OCCLUSION_HINT_MISMATCH,
-            FailureReason.TOO_MANY_ATTEMPTS,
             FailureReason.SESSION_RESET
         )
 

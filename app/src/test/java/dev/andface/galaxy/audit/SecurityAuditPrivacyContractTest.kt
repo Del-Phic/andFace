@@ -63,30 +63,19 @@ class SecurityAuditPrivacyContractTest {
 
 
     @Test
-    fun auditLoggerIsNoOpForDemoFaceAuthenticationApp() {
+    fun auditLoggerUsesPersistentJournal() {
         val source = readProjectFile("app/src/main/java/dev/andface/galaxy/audit/SecurityAuditLogger.kt")
-
-        assertTrue(source.contains("fun isHealthy(): Boolean = true"))
-        assertTrue(source.contains("fun latestEventWallClockMs(): Long? = null"))
-        assertTrue(source.contains("private fun append(eventType: String, fields: JSONObject): Boolean = true"))
+        assertTrue(source.contains("journal.append(eventType, fields.withAuditMetadata())"))
+        assertTrue(source.contains("secureCodec.protect(events.toString())"))
+        assertTrue(source.contains("journal.isHealthy()"))
     }
-    @Test
-    fun secureCodecRegeneratesUnusableKeystoreKeyWhenProtectFails() {
-        val source = readProjectFile("app/src/main/java/dev/andface/galaxy/enrollment/SecureProfileCodec.kt")
 
-        assertTrue(source.contains("regenerateKeyOnProtectFailure = true"))
-        assertTrue(source.contains("if (!regenerateKeyOnProtectFailure) throw error"))
-        assertTrue(source.contains("deleteKey(keyAlias)"))
-        assertTrue(source.contains("protectWithKey(plainJson, getOrCreateKey(keyAlias))"))
-        assertTrue(source.contains("keyStore.deleteEntry(alias)"))
-    }
     @Test
-    fun enrollmentProfileCodecRegeneratesAnUnusableKeystoreKey() {
+    fun storageErrorsCannotSilentlyDeleteSharedKeystoreKeys() {
         val source = readProjectFile("app/src/main/java/dev/andface/galaxy/enrollment/SecureProfileCodec.kt")
-        val profileFactory = source.substringAfter("fun enrollmentProfiles()").substringBefore("fun auditLog()")
-
-        assertTrue(profileFactory.contains("keyAlias = PROFILE_KEY_ALIAS"))
-        assertTrue(profileFactory.contains("regenerateKeyOnProtectFailure = true"))
+        assertTrue(!source.contains("deleteEntry("))
+        assertTrue(!source.contains("regenerateKeyOnProtectFailure"))
+        assertTrue(source.contains("return protectWithKey(plainJson, getOrCreateKey(keyAlias))"))
     }
 
     private fun readProjectFile(path: String): String {

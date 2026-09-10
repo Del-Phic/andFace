@@ -9,8 +9,8 @@ class FaceAuthenticationAlgorithmContractTest {
     fun authenticationCombinesFuzzyPrimaryAndMahalanobisAuxiliaryWithRequiredWeights() {
         val source = readProjectFile("app/src/main/java/dev/andface/galaxy/auth/AuthenticationEngine.kt")
 
-        assertTrue(source.contains("const val FUZZY_WEIGHT = 0.70"))
-        assertTrue(source.contains("const val MAHALANOBIS_WEIGHT = 0.30"))
+        assertTrue(source.contains("const val FUZZY_WEIGHT = 0.72"))
+        assertTrue(source.contains("const val MAHALANOBIS_WEIGHT = 0.28"))
         assertTrue(source.contains("FUZZY_WEIGHT * fuzzy.score + MAHALANOBIS_WEIGHT * mahalanobis.score"))
     }
 

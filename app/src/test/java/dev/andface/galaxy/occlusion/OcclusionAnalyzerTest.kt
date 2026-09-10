@@ -65,10 +65,32 @@ class OcclusionAnalyzerTest {
             assertFalse("$type should be excluded by a manual mask hint", evidence.observable)
             assertTrue(evidence.reason.contains("manual_mask_covered"))
         }
-        listOf(FeatureType.NoseBridgeLength, FeatureType.NoseRootToBrowLine, FeatureType.LeftBrowNoseRoot).forEach { type ->
+        listOf(FeatureType.NoseRootToBrowLine, FeatureType.LeftBrowNoseRoot).forEach { type ->
             assertTrue("$type should remain available above the mask", result.evidenceFor(type).observable)
         }
         assertTrue(result.observableCount < FeatureType.COUNT - 13)
+    }
+
+    @Test
+    fun maskExcludesDerivedFeaturesThatDependOnCoveredNoseTipOrCheek() {
+        val coveredTypes = listOf(
+            FeatureType.NoseBridgeLength, FeatureType.NoseBridgeToEyeSpanRatio,
+            FeatureType.NoseBridgeInnerEyeSpanRatio,
+            FeatureType.LeftInnerEyeNoseBridgeTriangle, FeatureType.RightInnerEyeNoseBridgeTriangle,
+            FeatureType.InnerEyeNoseBridgeTriangleAsymmetry,
+            FeatureType.LeftTempleCheekSlope, FeatureType.RightTempleCheekSlope,
+            FeatureType.TempleCheekSlopeAsymmetry
+        )
+        val frame = baseFrame()
+        val changed = frame.copy(values = frame.values.copyOf().apply {
+            coveredTypes.forEach { this[it.ordinal] += 5.0 }
+        })
+        val hint = OcclusionHint(lowerFaceCovered = true)
+        val baseline = analyzer.analyzeResolved(frame, null, hint)
+        val masked = analyzer.analyzeResolved(changed, null, hint)
+        coveredTypes.forEach { assertFalse("hidden dependency: $it", masked.evidenceFor(it).observable) }
+        assertEquals(baseline.observableEvidence, masked.observableEvidence)
+        assertTrue(analyzer.analyzeResolved(changed, null, OcclusionHint()).evidenceFor(FeatureType.NoseBridgeLength).observable)
     }
 
     @Test

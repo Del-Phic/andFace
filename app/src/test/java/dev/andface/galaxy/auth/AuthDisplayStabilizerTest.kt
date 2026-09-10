@@ -1,94 +1,68 @@
 package dev.andface.galaxy.auth
 
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
-import org.junit.Assert.assertSame
+import org.junit.Assert.*
 import org.junit.Test
 
 class AuthDisplayStabilizerTest {
     private var nowMs = 10_000L
-    private val stabilizer = AuthDisplayStabilizer(
-        clockMs = { nowMs },
-        successHoldMs = 1_500L,
-        successRefreshMs = 800L,
-        transientFailureFrameThreshold = 8,
-        identityFailureFrameThreshold = 3
-    )
+    private val stabilizer = AuthDisplayStabilizer(clockMs = { nowMs })
 
     @Test
-    fun successBecomesCompletedOnlyAfterSameIdentityHoldsForTwoSeconds() {
+    fun continuousSameIdentityRequiresTwoSecondsBeforeCompletion() {
         val success = success()
-
-        val pending = stabilizer.stabilize(success)
-        assertEquals(AuthDecision.FAILED, pending?.decision)
-        assertEquals(FailureReason.UNSTABLE_DECISION, pending?.failureReason)
-
-        nowMs += 1_999L
+        assertPending(stabilizer.stabilize(success))
+        repeat(7) { nowMs += 250L; assertNull(stabilizer.stabilize(success)) }
+        nowMs += 249L
         assertNull(stabilizer.stabilize(success))
-        nowMs += 1L
+        nowMs++
         assertSame(success, stabilizer.stabilize(success))
     }
 
     @Test
-    fun briefNoFaceDoesNotRestartCompletionQualification() {
+    fun briefNoFaceWithinHalfSecondDoesNotRestartQualification() {
         val success = success()
-        stabilizer.stabilize(success)
-        nowMs += 1_500L
+        assertPending(stabilizer.stabilize(success))
+        nowMs += 200L
         assertNull(stabilizer.stabilize(AuthResult.failed(FailureReason.NO_FACE)))
-
-        nowMs += 500L
+        nowMs += 200L
         assertNull(stabilizer.stabilize(success))
-        nowMs += 10L
+        repeat(7) { nowMs += 200L; assertNull(stabilizer.stabilize(success)) }
+        nowMs += 200L
         assertSame(success, stabilizer.stabilize(success))
     }
 
     @Test
-    fun differentIdentityFailureStillRestartsCompletionQualification() {
-        val success = success()
-        stabilizer.stabilize(success)
-        nowMs += 1_500L
-        stabilizer.stabilize(
-            identityFailure(occlusionSummary = "clean").copy(matchedUserId = "USER_2")
-        )
-
-        nowMs += 10L
-        val restarted = stabilizer.stabilize(success)
-        assertEquals(FailureReason.UNSTABLE_DECISION, restarted?.failureReason)
-        nowMs += 1_999L
-        assertNull(stabilizer.stabilize(success))
-        nowMs += 1L
-        assertSame(success, stabilizer.stabilize(success))
+    fun sparseSuccessfulFramesCannotQualify() {
+        repeat(5) {
+            assertPending(stabilizer.stabilize(success()))
+            nowMs += 1000L
+        }
     }
 
     @Test
-    fun briefSameIdentityNearMissDoesNotRestartCompletionQualification() {
+    fun identityMismatchRestartsQualificationEvenWhenNearestCandidateIsTheSameUser() {
         val success = success()
         stabilizer.stabilize(success)
-        nowMs += 1_000L
-        assertNull(stabilizer.stabilize(identityFailure(occlusionSummary = "lower")))
-        nowMs += 1_000L
-        assertNull(stabilizer.stabilize(success))
-        nowMs += 10L
-        assertSame(success, stabilizer.stabilize(success))
+        repeat(6) { nowMs += 250L; stabilizer.stabilize(success) }
+        nowMs += 30L
+        stabilizer.stabilize(identityFailure("clean"))
+        nowMs += 30L
+        assertPending(stabilizer.stabilize(success))
     }
 
     @Test
-    fun prolongedNoFaceRestartsCompletionQualification() {
-        val success = success()
-        stabilizer.stabilize(success)
-        nowMs += 2_501L
-        stabilizer.stabilize(AuthResult.failed(FailureReason.NO_FACE))
-
-        nowMs += 10L
-        val restarted = stabilizer.stabilize(success)
-        assertEquals(FailureReason.UNSTABLE_DECISION, restarted?.failureReason)
+    fun prolongedNoFaceRestartsQualification() {
+        stabilizer.stabilize(success())
+        nowMs += 501L
+        assertEquals(FailureReason.NO_FACE, stabilizer.stabilize(AuthResult.failed(FailureReason.NO_FACE))?.failureReason)
+        nowMs++
+        assertPending(stabilizer.stabilize(success()))
     }
 
     @Test
-    fun completedSuccessRefreshesMetricsAtReadableIntervals() {
+    fun successfulFramesRefreshMetricsAtReadableIntervals() {
         completeSuccess()
         val updated = success(finalScore = 0.79)
-
         nowMs += 300L
         assertNull(stabilizer.stabilize(updated))
         nowMs += 500L
@@ -96,187 +70,117 @@ class AuthDisplayStabilizerTest {
     }
 
     @Test
-    fun completedSuccessStaysLatchedAcrossNoFaceUntilAnotherIdentityAppears() {
-        val completed = success()
-        completeSuccess(completed)
-        val noFace = AuthResult.failed(FailureReason.NO_FACE)
-
-        repeat(7) {
-            nowMs += 100L
-            assertNull(stabilizer.stabilize(noFace))
-        }
-        nowMs += 100L
-        assertSame(completed, stabilizer.stabilize(noFace))
-
-        repeat(7) {
-            nowMs += 100L
-            assertNull(stabilizer.stabilize(noFace))
-        }
-        nowMs += 100L
-        assertSame(completed, stabilizer.stabilize(noFace))
-    }
-
-    @Test
-    fun productionLatchSurvivesBriefIdentityDropWhilePersonLeavesFrame() {
-        val production = AuthDisplayStabilizer(clockMs = { nowMs })
-        val completed = success()
-        assertEquals(FailureReason.UNSTABLE_DECISION, production.stabilize(completed)?.failureReason)
-        nowMs += 1_000L
-        assertNull(production.stabilize(completed))
-        nowMs += 1_000L
-        assertSame(completed, production.stabilize(completed))
-
-        repeat(8) {
-            nowMs += 35L
-            assertNull(production.stabilize(identityFailure(occlusionSummary = "clean")))
-        }
-        val noFace = AuthResult.failed(FailureReason.NO_FACE)
-        nowMs += 520L
-        assertSame(completed, production.stabilize(noFace))
-    }
-
-    @Test
-    fun cleanIdentityMismatchReleasesCompletedSuccessAfterThreeFrames() {
-        completeSuccess()
-        val mismatch = identityFailure(occlusionSummary = "clean")
-
-        repeat(2) {
-            nowMs += 30L
-            assertNull(stabilizer.stabilize(mismatch))
-        }
-        nowMs += 30L
-        assertSame(mismatch, stabilizer.stabilize(mismatch))
-    }
-
-    @Test
-    fun maskAndEyePatchTransitionsUseEightFramesBeforeReleasingCompletedSuccess() {
-        completeSuccess()
-        val maskedMismatch = identityFailure(occlusionSummary = "lower")
-
-        repeat(7) {
-            nowMs += 30L
-            stabilizer.stabilize(maskedMismatch)
-        }
-        nowMs += 30L
-        assertSame(maskedMismatch, stabilizer.stabilize(maskedMismatch))
-
-        completeSuccess(success(occlusionSummary = "left_eye"))
-        val patchedMismatch = identityFailure(occlusionSummary = "left_eye")
-        repeat(7) {
-            nowMs += 30L
-            stabilizer.stabilize(patchedMismatch)
-        }
-        nowMs += 30L
-        assertSame(patchedMismatch, stabilizer.stabilize(patchedMismatch))
-    }
-
-    @Test
-    fun sameCompletedUserCanMoveBetweenCleanMaskAndEyePatchModes() {
-        completeSuccess()
-
+    fun noFaceDisplayRefreshDoesNotExtendLastRealSuccessDeadline() {
+        val success = success()
+        completeSuccess(success)
         nowMs += 800L
-        val masked = success(occlusionSummary = "lower")
-        assertSame(masked, stabilizer.stabilize(masked))
-
-        nowMs += 800L
-        val patched = success(occlusionSummary = "right_eye")
-        assertSame(patched, stabilizer.stabilize(patched))
-    }
-
-    @Test
-    fun differentSuccessfulUserClearsOldCompletionAndNeedsOwnTwoSeconds() {
-        completeSuccess(success(userId = "USER_1"))
-        val other = success(userId = "USER_2")
-
-        nowMs += 30L
-        val pending = stabilizer.stabilize(other)
-        assertEquals(AuthDecision.FAILED, pending?.decision)
-        assertEquals("USER_2", pending?.matchedUserId)
-        assertEquals(FailureReason.UNSTABLE_DECISION, pending?.failureReason)
-
-        nowMs += 1_999L
-        assertNull(stabilizer.stabilize(other))
-        nowMs += 1L
-        assertSame(other, stabilizer.stabilize(other))
-    }
-
-    @Test
-    fun unsafeStatesReleaseCompletionImmediately() {
-        completeSuccess()
-
-        nowMs += 30L
-        val multipleFaces = AuthResult.failed(FailureReason.MULTIPLE_FACES)
-        assertSame(multipleFaces, stabilizer.stabilize(multipleFaces))
-
-        completeSuccess()
-        nowMs += 30L
-        val excessiveOcclusion = AuthResult.failed(FailureReason.EXCESSIVE_OCCLUSION)
-        assertSame(excessiveOcclusion, stabilizer.stabilize(excessiveOcclusion))
-
-        completeSuccess()
-        nowMs += 30L
-        val security = AuthResult.failed(FailureReason.SECURE_STORAGE_ERROR)
-        assertSame(security, stabilizer.stabilize(security))
-    }
-
-    @Test
-    fun lowLivenessBeforeCompletionStillReceivesGrace() {
-        val failure = AuthResult.failed(FailureReason.LOW_LIVENESS)
-
-        repeat(25) {
-            nowMs += 100L
-            assertNull(stabilizer.stabilize(failure))
-        }
-        nowMs += 99L
-        assertNull(stabilizer.stabilize(failure))
-        nowMs += 1L
-        assertSame(failure, stabilizer.stabilize(failure))
-    }
-
-    @Test
-    fun resetClearsCompletedSuccess() {
-        completeSuccess()
-        stabilizer.reset()
-
-        nowMs += 800L
+        assertSame(success, stabilizer.stabilize(AuthResult.failed(FailureReason.NO_FACE)))
+        nowMs += 700L
         val noFace = AuthResult.failed(FailureReason.NO_FACE)
         assertSame(noFace, stabilizer.stabilize(noFace))
     }
 
+    @Test
+    fun successAfterAFrameGapMustQualifyAgain() {
+        completeSuccess()
+        nowMs += 1501L
+        assertPending(stabilizer.stabilize(success()))
+    }
+
+    @Test
+    fun alternatingTransientFailuresCannotKeepSuccessAlive() {
+        completeSuccess()
+        nowMs += 800L
+        stabilizer.stabilize(AuthResult.failed(FailureReason.LOW_LIVENESS))
+        nowMs += 700L
+        val failure = AuthResult.failed(FailureReason.POOR_FACE_QUALITY)
+        assertSame(failure, stabilizer.stabilize(failure))
+    }
+
+    @Test
+    fun livenessGraceCannotDelayAnExpiredCompletedSuccess() {
+        completeSuccess()
+        nowMs += 1500L
+        val failure = AuthResult.failed(FailureReason.LOW_LIVENESS)
+        assertSame(failure, stabilizer.stabilize(failure))
+    }
+
+    @Test
+    fun identityFailureImmediatelyRevokesCompletionInEveryOcclusionMode() {
+        for (mode in listOf("clean", "lower", "glasses", "lower+glasses", "left_eye", "right_eye")) {
+            stabilizer.reset()
+            completeSuccess(success(occlusionSummary = mode))
+            nowMs += 30L
+            val mismatch = identityFailure(mode)
+            assertSame("mode=$mode", mismatch, stabilizer.stabilize(mismatch))
+            nowMs += 30L
+            assertPending(stabilizer.stabilize(success(occlusionSummary = mode)))
+        }
+    }
+
+    @Test
+    fun sameUserSuccessfulOcclusionTransitionsPreserveCompletion() {
+        completeSuccess()
+        for (mode in listOf("lower", "glasses", "lower+glasses", "right_eye")) {
+            nowMs += 800L
+            val incoming = success(occlusionSummary = mode)
+            assertSame(incoming, stabilizer.stabilize(incoming))
+        }
+    }
+
+    @Test
+    fun differentSuccessfulUserNeedsOwnConfirmation() {
+        completeSuccess()
+        nowMs += 30L
+        val other = success(userId = "USER_2")
+        val pending = stabilizer.stabilize(other)
+        assertPending(pending)
+        assertEquals("USER_2", pending?.matchedUserId)
+        repeat(7) { nowMs += 250L; assertNull(stabilizer.stabilize(other)) }
+        nowMs += 250L
+        assertSame(other, stabilizer.stabilize(other))
+    }
+
+    @Test
+    fun unsafeStatesAndSessionResetRevokeImmediately() {
+        for (reason in listOf(FailureReason.MULTIPLE_FACES, FailureReason.EXCESSIVE_OCCLUSION,
+            FailureReason.SECURE_STORAGE_ERROR, FailureReason.MODEL_NOT_READY,
+            FailureReason.SESSION_RESET)) {
+            stabilizer.reset()
+            completeSuccess()
+            nowMs += 30L
+            val failure = AuthResult.failed(reason)
+            assertSame(failure, stabilizer.stabilize(failure))
+        }
+    }
+
+    @Test
+    fun resetClearsCompletion() {
+        completeSuccess()
+        stabilizer.reset()
+        assertPending(stabilizer.stabilize(success()))
+    }
+
     private fun completeSuccess(result: AuthResult = success()) {
-        val pending = stabilizer.stabilize(result)
-        assertEquals(FailureReason.UNSTABLE_DECISION, pending?.failureReason)
-        nowMs += 1_000L
-        assertNull(stabilizer.stabilize(result))
-        nowMs += 1_000L
+        assertPending(stabilizer.stabilize(result))
+        repeat(7) { nowMs += 250L; assertNull(stabilizer.stabilize(result)) }
+        nowMs += 250L
         assertSame(result, stabilizer.stabilize(result))
     }
 
-    private fun identityFailure(occlusionSummary: String): AuthResult {
-        return AuthResult.failed(FailureReason.LOW_SCORE).copy(
-            matchedUserId = "USER_1",
-            registeredUserCount = 1,
-            coverage = 0.80,
-            observableCount = 10,
-            occlusionSummary = occlusionSummary
-        )
+    private fun assertPending(result: AuthResult?) {
+        assertEquals(AuthDecision.FAILED, result?.decision)
+        assertEquals(FailureReason.UNSTABLE_DECISION, result?.failureReason)
     }
 
-    private fun success(
-        userId: String = "USER_1",
-        finalScore: Double = 0.80,
-        occlusionSummary: String = "clean"
-    ): AuthResult {
-        return AuthResult.failed(FailureReason.NONE).copy(
-            decision = AuthDecision.SUCCESS,
-            matchedUserId = userId,
-            registeredUserCount = 1,
-            finalScore = finalScore,
-            coverage = 0.80,
-            margin = 0.30,
-            livenessScore = 0.90,
-            livenessPassed = true,
-            occlusionSummary = occlusionSummary
-        )
-    }
+    private fun identityFailure(mode: String) = AuthResult.failed(FailureReason.LOW_SCORE).copy(
+        matchedUserId = "USER_1", occlusionSummary = mode
+    )
+
+    private fun success(userId: String = "USER_1", finalScore: Double = 0.80,
+        occlusionSummary: String = "clean") = AuthResult.failed(FailureReason.NONE).copy(
+        decision = AuthDecision.SUCCESS, matchedUserId = userId, registeredUserCount = 1,
+        finalScore = finalScore, coverage = 0.80, margin = 0.30,
+        livenessScore = 0.90, livenessPassed = true, occlusionSummary = occlusionSummary
+    )
 }

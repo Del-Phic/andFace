@@ -24,6 +24,10 @@ class MahalanobisEngine {
             return MahalanobisResult(score = 0.0, distance = Double.POSITIVE_INFINITY, usedDiagonalFallback = true)
         }
 
+        if (usableEvidence.any { !it.value.isFinite() || !it.visibility.isFinite() } ||
+            usableEvidence.map { it.type }.distinct().size != usableEvidence.size
+        ) return invalidResult()
+
         val dimensions = usableEvidence.size
         val diff = DoubleArray(dimensions)
         val covariance = Array(dimensions) { DoubleArray(dimensions) }
@@ -37,6 +41,9 @@ class MahalanobisEngine {
             val confidence = rowEvidence.visibility.coerceIn(MIN_CONFIDENCE_WEIGHT, 1.0)
             effectiveDimensionSum += confidence
             diff[row] = rowEvidence.value - profile.mean(rowType)
+            if (!diff[row].isFinite() ||
+                !profile.covariance[rowType.ordinal][rowType.ordinal].isFinite()
+            ) return invalidResult()
             val floorVariance = rowType.minimumSigma * rowType.minimumSigma
             val profileVariance = max(profile.covariance[rowType.ordinal][rowType.ordinal], floorVariance)
             diagonalVariances[row] = profileVariance +
@@ -60,16 +67,15 @@ class MahalanobisEngine {
 
         var usedFallback = false
         val distanceSquared = choleskyDistance(diff, covariance) ?: run {
-            val inverse = invert(covariance)
-            if (inverse != null) {
-                quadraticForm(diff, inverse)
-            } else {
-                usedFallback = true
-                diagonalDistance(diff, diagonalVariances)
-            }
+            // An invertible but indefinite covariance is not a valid distance
+            // metric: its negative quadratic form used to be clamped to zero,
+            // yielding a perfect score for an outlier. Use positive variances.
+            usedFallback = true
+            diagonalDistance(diff, diagonalVariances)
         }
 
-        val boundedDistanceSquared = max(distanceSquared, 0.0)
+        if (!distanceSquared.isFinite() || distanceSquared < 0.0) return invalidResult()
+        val boundedDistanceSquared = distanceSquared
         val effectiveDimensions = max(effectiveDimensionSum, 1.0)
         val normalizedDistance = boundedDistanceSquared / effectiveDimensions
         val exponentialScore = exp(-DISTANCE_TO_SCORE_SCALE * normalizedDistance).coerceIn(0.0, 1.0)
@@ -123,67 +129,9 @@ class MahalanobisEngine {
         return solved.sumOf { value -> value * value }
     }
 
-    private fun quadraticForm(diff: DoubleArray, inverse: Array<DoubleArray>): Double {
-        var total = 0.0
-        for (row in diff.indices) {
-            var rowValue = 0.0
-            for (col in diff.indices) {
-                rowValue += inverse[row][col] * diff[col]
-            }
-            total += diff[row] * rowValue
-        }
-        return total
-    }
-
-    private fun invert(matrix: Array<DoubleArray>): Array<DoubleArray>? {
-        val size = matrix.size
-        val augmented = Array(size) { row ->
-            DoubleArray(size * 2) { col ->
-                when {
-                    col < size -> matrix[row][col]
-                    col - size == row -> 1.0
-                    else -> 0.0
-                }
-            }
-        }
-
-        for (pivotIndex in 0 until size) {
-            var bestRow = pivotIndex
-            var bestAbs = kotlin.math.abs(augmented[pivotIndex][pivotIndex])
-            for (row in pivotIndex + 1 until size) {
-                val candidate = kotlin.math.abs(augmented[row][pivotIndex])
-                if (candidate > bestAbs) {
-                    bestAbs = candidate
-                    bestRow = row
-                }
-            }
-
-            if (bestAbs < PIVOT_EPSILON) return null
-
-            if (bestRow != pivotIndex) {
-                val temp = augmented[pivotIndex]
-                augmented[pivotIndex] = augmented[bestRow]
-                augmented[bestRow] = temp
-            }
-
-            val pivot = augmented[pivotIndex][pivotIndex]
-            for (col in 0 until size * 2) {
-                augmented[pivotIndex][col] /= pivot
-            }
-
-            for (row in 0 until size) {
-                if (row == pivotIndex) continue
-                val factor = augmented[row][pivotIndex]
-                for (col in 0 until size * 2) {
-                    augmented[row][col] -= factor * augmented[pivotIndex][col]
-                }
-            }
-        }
-
-        return Array(size) { row ->
-            DoubleArray(size) { col -> augmented[row][col + size] }
-        }
-    }
+    private fun invalidResult() = MahalanobisResult(
+        score = 0.0, distance = Double.POSITIVE_INFINITY, usedDiagonalFallback = true
+    )
 
     private fun shrinkageFor(sampleCount: Int, dimensions: Int): Double {
         val sampleRatio = dimensions.toDouble() / max(sampleCount + dimensions, 1).toDouble()
@@ -234,7 +182,6 @@ class MahalanobisEngine {
         private const val EXPONENTIAL_SCORE_WEIGHT = 0.60
         private const val CHI_SQUARE_SCORE_WEIGHT = 0.40
         private const val CHOLESKY_EPSILON = 1e-10
-        private const val PIVOT_EPSILON = 1e-9
         private const val MIN_CONFIDENCE_WEIGHT = 0.35
         private const val ERF_P = 0.3275911
         private const val ERF_A1 = 0.254829592

@@ -117,6 +117,12 @@ class OcclusionAnalyzer {
             reason = appendReason(reason, "manual_mask_covered")
         }
 
+        if (hint.lowerFaceCovered && type in MASK_UNRELIABLE_CONTOUR_TYPES) {
+            visibility = 0.0
+            observable = false
+            reason = appendReason(reason, "mask_contour_uncertain")
+        }
+
         if (midFaceOccluded && type.isMidFace) {
             visibility = 0.0
             observable = false
@@ -389,6 +395,18 @@ class OcclusionAnalyzer {
         private const val PROFILE_IRIS_UNAVAILABLE_SIGMA_MULTIPLIER = 40.0
 
         private val MANUAL_MASK_COVERED_MID_TYPES = setOf(
+            // These names mention the bridge/eyes/temple, but their extractor
+            // formulas also use the covered nose tip or cheek. Model estimates
+            // of those hidden landmarks must not count as observed evidence.
+            FeatureType.NoseBridgeLength,
+            FeatureType.NoseBridgeToEyeSpanRatio,
+            FeatureType.NoseBridgeInnerEyeSpanRatio,
+            FeatureType.LeftInnerEyeNoseBridgeTriangle,
+            FeatureType.RightInnerEyeNoseBridgeTriangle,
+            FeatureType.InnerEyeNoseBridgeTriangleAsymmetry,
+            FeatureType.LeftTempleCheekSlope,
+            FeatureType.RightTempleCheekSlope,
+            FeatureType.TempleCheekSlopeAsymmetry,
             FeatureType.NoseWidth,
             FeatureType.EyeNoseLeft,
             FeatureType.EyeNoseRight,
@@ -426,6 +444,18 @@ class OcclusionAnalyzer {
             FeatureType.CheekNoseDepthAsymmetry,
             FeatureType.NoseTipInnerEyeLineDistance,
             FeatureType.NoseTipDepthToEyeSpanRatio
+        )
+
+        // A mask can move the fitted outer contour even while the eye span is
+        // unchanged. Whole-mesh pose is also an acquisition/liveness signal,
+        // not stable identity evidence for this partially observed mesh.
+        private val MASK_UNRELIABLE_CONTOUR_TYPES = setOf(
+            FeatureType.UpperFacePerimeterRatio,
+            FeatureType.LeftTempleBrowDistance, FeatureType.RightTempleBrowDistance,
+            FeatureType.TempleBrowDistanceAsymmetry,
+            FeatureType.LeftTempleEye, FeatureType.RightTempleEye,
+            FeatureType.TempleEyeAsymmetry,
+            FeatureType.Yaw, FeatureType.Pitch, FeatureType.Roll
         )
 
         private val LOWER_FACE_TYPES = FeatureType.ordered

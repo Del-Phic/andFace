@@ -79,7 +79,22 @@ object AuditChain {
             timestampMs = event.getLong("timestampMs"),
             previousHash = actualPreviousHash
         )
-        check(event.getString("hash") == expectedHash) { "Audit event hash is invalid." }
+        val storedHash = event.getString("hash")
+        if (storedHash != expectedHash) {
+            // Old authentication records hashed rounded Double metrics before
+            // JSON serialization changed 0.0/1.0 to 0/1. Restore only those known
+            // typed fields and require the original hash to match exactly.
+            val fields = JSONObject(event.getJSONObject("fields").toString())
+            val authenticationEvent = event.getString("eventType") in setOf("AUTH_SUCCESS", "AUTH_FAILED")
+            if (authenticationEvent) {
+                for (key in listOf("finalScore", "coverage", "margin")) {
+                    if (fields.has(key)) fields.put(key, fields.getDouble(key))
+                }
+            }
+            check(authenticationEvent && storedHash == hashFor(
+                version, event.getString("eventType"), fields, event.getLong("timestampMs"), actualPreviousHash
+            )) { "Audit event hash is invalid." }
+        }
     }
 
     private fun buildEvent(
@@ -88,13 +103,15 @@ object AuditChain {
         timestampMs: Long,
         previousHash: String
     ): JSONObject {
+        // Hash the representation that survives the persistence round trip.
+        val persistedFields = JSONObject(fields.toString())
         return JSONObject()
             .put("chainVersion", CURRENT_VERSION)
             .put("timestampMs", timestampMs)
             .put("eventType", eventType)
-            .put("fields", fields)
+            .put("fields", persistedFields)
             .put("prevHash", previousHash)
-            .put("hash", hashFor(CURRENT_VERSION, eventType, fields, timestampMs, previousHash))
+            .put("hash", hashFor(CURRENT_VERSION, eventType, persistedFields, timestampMs, previousHash))
     }
 
     private fun reanchor(events: JSONArray): JSONArray {

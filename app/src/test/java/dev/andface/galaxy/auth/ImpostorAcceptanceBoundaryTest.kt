@@ -100,6 +100,52 @@ class ImpostorAcceptanceBoundaryTest {
         }
     }
 
+    @Test
+    fun cleanMaskGlassesAndCombinedModeKeepGenuineUsersAndRejectImpostors() {
+        val enrolled = listOf(BASE_FACE, IMPOSTOR_FACE, OTHER_FACE)
+        val profiles = enrolled.mapIndexed { index, base ->
+            EnrollmentBuilder.build("USER_${index + 1}", enrollmentSamples(base))
+        }
+        val hints = listOf(OcclusionHint(), OcclusionHint(lowerFaceCovered = true),
+            OcclusionHint(glasses = true), OcclusionHint(lowerFaceCovered = true, glasses = true))
+        var genuinePasses = 0
+        var impostorRejects = 0
+        for (hint in hints) {
+            for ((index, base) in enrolled.withIndex()) {
+                val engine = AuthenticationEngine().apply { setProfiles(profiles) }
+                val result = liveFrames(withOcclusion(base, hint)).map { engine.authenticate(it, hint) }.last()
+                assertEquals("genuine user=${index + 1} hint=$hint reason=${result.failureReason} coverage=${result.coverage} obs=${result.observableCount} support=${result.identitySupportCount}",
+                    AuthDecision.SUCCESS, result.decision)
+                assertEquals("USER_${index + 1}", result.matchedUserId)
+                genuinePasses++
+            }
+            for (share in listOf(0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.60, 0.70, 0.75, 0.80, 0.85)) {
+                val probe = withOcclusion(blend(BASE_FACE, IMPOSTOR_FACE, share), hint)
+                val engine = AuthenticationEngine().apply { setProfiles(profiles) }
+                val results = liveFrames(probe).map { engine.authenticate(it, hint) }
+                assertTrue("impostor share=$share hint=$hint results=${results.map { it.decision to it.finalScore }}",
+                    results.none { it.decision == AuthDecision.SUCCESS })
+                impostorRejects++
+            }
+        }
+        println("clean/mask/glasses/mask+glasses synthetic matrix: genuine=$genuinePasses/12 impostor=$impostorRejects/44")
+    }
+
+    private fun withOcclusion(base: DoubleArray, hint: OcclusionHint): DoubleArray = base.copyOf().apply {
+        if (hint.lowerFaceCovered) {
+            this[FeatureType.NoseToChin.ordinal] += 0.10
+            this[FeatureType.MouthWidth.ordinal] -= 0.13
+            this[FeatureType.JawWidth.ordinal] += 0.36
+            this[FeatureType.NoseToMouth.ordinal] += 0.08
+            this[FeatureType.FaceAspect.ordinal] -= 0.16
+        }
+        if (hint.glasses) {
+            this[FeatureType.LeftEyeOpen.ordinal] *= 0.40
+            this[FeatureType.RightEyeOpen.ordinal] *= 0.42
+            this[FeatureType.BrowDistance.ordinal] += 0.006
+        }
+    }
+
     private fun blend(genuine: DoubleArray, impostor: DoubleArray, impostorShare: Double): DoubleArray {
         return DoubleArray(genuine.size) { index ->
             genuine[index] * (1.0 - impostorShare) + impostor[index] * impostorShare

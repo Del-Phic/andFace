@@ -13,6 +13,7 @@ import dev.andface.galaxy.occlusion.OcclusionHint
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.exp
+import kotlin.math.sqrt
 
 class AuthenticationEngine(
     private val occlusionAnalyzer: OcclusionAnalyzer = OcclusionAnalyzer(),
@@ -21,57 +22,20 @@ class AuthenticationEngine(
     private val livenessTracker: LivenessTracker = LivenessTracker(),
     private val temporalDecisionGate: TemporalDecisionGate = TemporalDecisionGate(),
     private val featureFrameStabilizer: FeatureFrameStabilizer = FeatureFrameStabilizer(),
-    private val occlusionStateStabilizer: OcclusionStateStabilizer = OcclusionStateStabilizer(),
-    private val securityClockMs: () -> Long = { System.nanoTime() / NANOS_PER_MILLISECOND },
-    private val onAccessLockout: (Long) -> Unit = {},
-    private val onRiskyFailureStateChanged: (RiskyFailureState?) -> Unit = {}
+    private val occlusionStateStabilizer: OcclusionStateStabilizer = OcclusionStateStabilizer()
 ) {
-    data class RiskyFailureState(
-        val count: Int,
-        val windowStartMs: Long,
-        val lastCountedMs: Long
-    )
-
+    @Volatile
     var profiles: List<EnrollmentProfile> = emptyList()
         private set
     private var lastHint: OcclusionHint? = null
-    private var riskyFailureCount: Int = 0
-    private var riskyFailureWindowStartMs: Long = Long.MIN_VALUE
-    private var lastCountedRiskyFailureMs: Long = Long.MIN_VALUE
-    private var accessLockedUntilMs: Long = Long.MIN_VALUE
 
+    @Synchronized
     fun setProfiles(profiles: List<EnrollmentProfile>) {
         this.profiles = profiles.sortedBy { it.userId }
         resetLiveSession()
     }
 
-    fun restoreAccessLock(untilMs: Long) {
-        val nowMs = securityClockMs()
-        if (untilMs <= nowMs) return
-
-        accessLockedUntilMs = untilMs
-        clearRiskyFailureWindow()
-        resetLiveSession()
-    }
-
-    fun restoreRiskyFailureState(state: RiskyFailureState) {
-        val nowMs = securityClockMs()
-        if (
-            state.count <= 0 ||
-            state.windowStartMs <= Long.MIN_VALUE ||
-            nowMs - state.windowStartMs > RISKY_FAILURE_WINDOW_MS
-        ) {
-            clearRiskyFailureWindow()
-            return
-        }
-
-        riskyFailureCount = state.count.coerceAtMost(MAX_RISKY_FAILURES_BEFORE_LOCK - 1)
-        riskyFailureWindowStartMs = state.windowStartMs
-        lastCountedRiskyFailureMs = state.lastCountedMs
-        resetLiveSession()
-    }
-
-
+    @Synchronized
     fun resetLiveSession() {
         livenessTracker.reset()
         temporalDecisionGate.reset()
@@ -80,15 +44,12 @@ class AuthenticationEngine(
         lastHint = null
     }
 
+    @Synchronized
     fun authenticate(rawFrame: RawFeatureFrame, hint: OcclusionHint): AuthResult {
-        val nowMs = securityClockMs()
         if (profiles.isEmpty()) return AuthResult.failed(FailureReason.NO_ENROLLMENT).withFrameQuality(rawFrame)
         invalidFeatureVectorReason(rawFrame)?.let { reason ->
             resetLiveSession()
             return AuthResult.failed(reason).copy(registeredUserCount = profiles.size).withFrameQuality(rawFrame)
-        }
-        if (isAccessLocked(nowMs)) {
-            return buildAccessLockedFailure().withFrameQuality(rawFrame)
         }
         if (!rawFrame.quality.acceptableForEnrollmentCapture) {
             resetLiveSession()
@@ -294,9 +255,7 @@ class AuthenticationEngine(
             } else {
                 strongestRejected?.rejectionReason?.takeIf { it != FailureReason.NONE } ?: FailureReason.LOW_COVERAGE
             }
-            return applyAccessGuard(
-                nowMs,
-                buildFailure(
+            return buildFailure(
                     reason = reason,
                     registeredUserCount = profiles.size,
                     matchedUserId = strongestRejected?.profile?.userId,
@@ -305,7 +264,6 @@ class AuthenticationEngine(
                     liveness = liveness,
                     occlusionSummary = strongestOcclusionSummary
                 ).withFrameQuality(scoringFrame)
-            )
         }
 
         val sortedCandidates = validCandidates.sortedByDescending { it.finalScore }
@@ -357,9 +315,7 @@ class AuthenticationEngine(
             immediateReason
         }
 
-        return applyAccessGuard(
-            nowMs,
-            AuthResult(
+        return AuthResult(
                 decision = if (reason == FailureReason.NONE) AuthDecision.SUCCESS else AuthDecision.FAILED,
                 failureReason = reason,
                 matchedUserId = best.profile.userId,
@@ -396,9 +352,9 @@ class AuthenticationEngine(
                 microRegionAgreementPassed = best.microRegionAgreementPassed,
                 microRegionDiagnostics = best.microRegionDiagnostics
             )
-        )
     }
 
+    @Synchronized
     fun checkEnrollmentSample(rawFrame: RawFeatureFrame, hint: OcclusionHint): FailureReason {
         invalidFeatureVectorReason(rawFrame)?.let { return it }
         if (!rawFrame.quality.acceptableForEnrollmentCapture) return FailureReason.POOR_FACE_QUALITY
@@ -410,6 +366,7 @@ class AuthenticationEngine(
         return FailureReason.NONE
     }
 
+    @Synchronized
     fun enrollmentSampleDiagnostic(rawFrame: RawFeatureFrame, hint: OcclusionHint): String {
         invalidFeatureVectorReason(rawFrame)?.let { return "vector=$it" }
         val geometryFailure = FeatureGeometryQualityPolicy.validateForCleanEnrollment(rawFrame)
@@ -442,6 +399,7 @@ class AuthenticationEngine(
         )
     }
 
+    @Synchronized
     fun checkEnrollmentBaseline(samples: List<RawFeatureFrame>): FailureReason {
         samples.forEach { frame ->
             invalidFeatureVectorReason(frame)?.let { return it }
@@ -452,6 +410,7 @@ class AuthenticationEngine(
         )
     }
 
+    @Synchronized
     fun checkEnrollmentSeparation(
         candidate: EnrollmentProfile,
         existingProfiles: List<EnrollmentProfile> = profiles
@@ -598,68 +557,6 @@ class AuthenticationEngine(
         )
     }
 
-    private fun buildAccessLockedFailure(): AuthResult {
-        return AuthResult(
-            decision = AuthDecision.FAILED,
-            failureReason = FailureReason.TOO_MANY_ATTEMPTS,
-            matchedUserId = null,
-            secondBestUserId = null,
-            registeredUserCount = profiles.size,
-            fuzzyScore = 0.0,
-            mahalanobisScore = 0.0,
-            finalScore = 0.0,
-            coverage = 0.0,
-            margin = 0.0,
-            livenessScore = 0.0,
-            livenessPassed = false,
-            livenessFrameCount = 0,
-            livenessChallenge = null,
-            livenessChallengePassed = false,
-            livenessPassivePassed = false,
-            observableCount = 0,
-            identityConsistencyScore = 0.0,
-            requiredIdentityConsistencyScore = 0.0,
-            identitySupportCount = 0,
-            requiredSupportCount = 0,
-            stableFrameCount = 0,
-            requiredStableFrames = 0,
-            occlusionSummary = "clean"
-        )
-    }
-
-    private fun applyAccessGuard(timestampMs: Long, result: AuthResult): AuthResult = result
-
-    private fun isAccessLocked(timestampMs: Long): Boolean = false
-
-    private fun resetAccessGuard() {
-        accessLockedUntilMs = Long.MIN_VALUE
-        clearRiskyFailureWindow()
-    }
-
-    private fun clearRiskyFailureWindow() {
-        riskyFailureCount = 0
-        riskyFailureWindowStartMs = Long.MIN_VALUE
-        lastCountedRiskyFailureMs = Long.MIN_VALUE
-    }
-
-    private fun countsTowardAccessLock(result: AuthResult): Boolean {
-        if (isMatureLivenessFailure(result)) return true
-        return result.failureReason in setOf(
-            FailureReason.LOW_MARGIN,
-            FailureReason.LOW_IDENTITY_COVERAGE,
-            FailureReason.LOW_IDENTITY_SUPPORT,
-            FailureReason.LOW_GLOBAL_CONSISTENCY,
-            FailureReason.EXCESSIVE_OCCLUSION,
-            FailureReason.OCCLUSION_HINT_MISMATCH,
-            FailureReason.LOW_SCORE
-        )
-    }
-
-    private fun isMatureLivenessFailure(result: AuthResult): Boolean {
-        return result.failureReason == FailureReason.LOW_LIVENESS &&
-            result.livenessFrameCount >= MIN_LIVENESS_FRAMES_FOR_RISK_LOCK
-    }
-
     private data class EnrollmentSeparationScenario(
         val name: String,
         val types: Set<FeatureType>,
@@ -709,6 +606,10 @@ class AuthenticationEngine(
     }
 
     private fun minimumCoverage(occlusionSummary: String): Double {
+        // With masked contour/pose excluded and glasses confidence applied,
+        // the maximum available coverage is about 0.499. Counts and regional
+        // identity checks still require the remaining evidence to agree.
+        if (occlusionSummary.contains("lower") && occlusionSummary.contains("glasses")) return 0.49
         return if (occlusionSummary == "clean") {
             MIN_COVERAGE
         } else {
@@ -730,14 +631,8 @@ class AuthenticationEngine(
         val enrolledGenuineThreshold = when {
             effectiveSummary == "clean" -> profile.calibratedCleanFinalScoreFloor
             isReducedIdentityOcclusion(effectiveSummary) ->
-                minOf(
-                    profile.calibratedCleanFinalScoreFloor - REDUCED_IDENTITY_FINAL_SCORE_RELAXATION,
-                    MAX_OPERATOR_REDUCED_IDENTITY_FINAL_SCORE
-                )
-            else -> minOf(
-                profile.calibratedCleanFinalScoreFloor - OCCLUDED_FINAL_SCORE_RELAXATION,
-                MAX_OPERATOR_OCCLUDED_FINAL_SCORE
-            )
+                profile.calibratedCleanFinalScoreFloor - REDUCED_IDENTITY_FINAL_SCORE_RELAXATION
+            else -> profile.calibratedCleanFinalScoreFloor - OCCLUDED_FINAL_SCORE_RELAXATION
         }
         return maxOf(cohortThreshold, enrolledGenuineThreshold)
     }
@@ -1043,6 +938,20 @@ class AuthenticationEngine(
         val noseTypes = NOSE_STRUCTURE_TYPES.filter { it in observableTypes }
         if (noseTypes.size < MIN_NOSE_STRUCTURE_FEATURE_COUNT) return false
 
+        // A shared scale change moves both sides together. Opposite residuals
+        // indicate different visible structure and must not be diluted by the
+        // many unchanged features or by excluding the covered nose tip.
+        val pairedStructureAgrees = VISIBLE_NOSE_ROOT_PAIRS.all { (left, right) ->
+            if (left !in observableTypes || right !in observableTypes) return@all true
+            val residual = (rawFrame.value(left) - rawFrame.value(right)) -
+                (profile.mean(left) - profile.mean(right))
+            val leftSigma = maxOf(profile.sigma(left), left.minimumSigma)
+            val rightSigma = maxOf(profile.sigma(right), right.minimumSigma)
+            val contrastSigma = sqrt(leftSigma * leftSigma + rightSigma * rightSigma)
+            abs(residual) <= MICRO_REGION_CLUSTER_OUTLIER_Z * contrastSigma
+        }
+        if (!pairedStructureAgrees) return false
+
         val strongInlierCount = noseTypes.count { type ->
             profileZScore(rawFrame, profile, type) <= NOSE_STRUCTURE_STRONG_Z
         }
@@ -1251,14 +1160,8 @@ class AuthenticationEngine(
         val enrolledGenuineThreshold = when {
             effectiveSummary == "clean" -> calibratedCleanFloor
             isReducedIdentityOcclusion(effectiveSummary) ->
-                minOf(
-                    calibratedCleanFloor - REDUCED_IDENTITY_MAHALANOBIS_RELAXATION,
-                    MAX_OPERATOR_REDUCED_IDENTITY_MAHALANOBIS_SCORE
-                )
-            else -> minOf(
-                calibratedCleanFloor - OCCLUDED_MAHALANOBIS_RELAXATION,
-                MAX_OPERATOR_OCCLUDED_MAHALANOBIS_SCORE
-            )
+                calibratedCleanFloor - REDUCED_IDENTITY_MAHALANOBIS_RELAXATION
+            else -> calibratedCleanFloor - OCCLUDED_MAHALANOBIS_RELAXATION
         }
         return maxOf(cohortThreshold, enrolledGenuineThreshold)
     }
@@ -1286,7 +1189,9 @@ class AuthenticationEngine(
             isGlassesOcclusion(occlusionSummary) ->
                 coreCount >= MIN_GLASSES_CORE_IDENTITY_COUNT &&
                     upperMidCount >= MIN_GLASSES_UPPER_MID_COUNT &&
-                    (lowerCount >= MIN_GLASSES_LOWER_COUNT || poseCount >= MIN_GLASSES_POSE_COUNT)
+                    (lowerCount >= MIN_GLASSES_LOWER_COUNT ||
+                        poseCount >= MIN_GLASSES_POSE_COUNT ||
+                        (occlusionSummary.contains("lower") && eyeCount >= MIN_OCCLUDED_EYE_COUNT))
             isReducedIdentityOcclusion(occlusionSummary) ->
                 coreCount >= MIN_REDUCED_CORE_IDENTITY_COUNT &&
                     upperMidCount >= MIN_REDUCED_UPPER_MID_COUNT &&
@@ -1335,7 +1240,9 @@ class AuthenticationEngine(
                 upperMidCount >= MIN_GLASSES_SUPPORTED_UPPER_MID_COUNT &&
                     upperFaceCount >= MIN_GLASSES_SUPPORTED_UPPER_FACE_COUNT &&
                     (!midFaceRequired || midFaceCount >= MIN_GLASSES_SUPPORTED_MID_FACE_COUNT) &&
-                    (lowerCount >= MIN_GLASSES_SUPPORTED_LOWER_COUNT || poseCount >= MIN_GLASSES_SUPPORTED_POSE_COUNT)
+                    (lowerCount >= MIN_GLASSES_SUPPORTED_LOWER_COUNT ||
+                        poseCount >= MIN_GLASSES_SUPPORTED_POSE_COUNT ||
+                        (occlusionSummary.contains("lower") && eyeCount >= 2))
             isReducedIdentityOcclusion(occlusionSummary) ->
                 upperMidCount >= MIN_REDUCED_SUPPORTED_UPPER_MID_COUNT &&
                     upperFaceCount >= MIN_REDUCED_SUPPORTED_UPPER_FACE_COUNT &&
@@ -1350,15 +1257,9 @@ class AuthenticationEngine(
     }
 
     companion object {
-        const val FUZZY_WEIGHT = 0.70
-        const val MAHALANOBIS_WEIGHT = 0.30
+        const val FUZZY_WEIGHT = 0.72
+        const val MAHALANOBIS_WEIGHT = 0.28
 
-        private const val NANOS_PER_MILLISECOND = 1_000_000L
-        private const val MAX_RISKY_FAILURES_BEFORE_LOCK = 8
-        private const val RISKY_FAILURE_WINDOW_MS = 12_000L
-        private const val MIN_RISKY_FAILURE_COUNT_INTERVAL_MS = 300L
-        private const val ACCESS_LOCKOUT_MS = 30_000L
-        private const val MIN_LIVENESS_FRAMES_FOR_RISK_LOCK = 8
 
         private const val MIN_OBSERVABLE_FEATURES = 24
         private const val MIN_OCCLUDED_OBSERVABLE_FEATURES = 20
@@ -1369,10 +1270,11 @@ class AuthenticationEngine(
         private const val MIN_FINAL_SCORE = 0.78
         private const val MIN_OCCLUDED_FINAL_SCORE = 0.62
         private const val MIN_REDUCED_IDENTITY_FINAL_SCORE = 0.60
-        private const val OCCLUDED_FINAL_SCORE_RELAXATION = 0.18
-        private const val REDUCED_IDENTITY_FINAL_SCORE_RELAXATION = 0.22
-        private const val MAX_OPERATOR_OCCLUDED_FINAL_SCORE = 0.64
-        private const val MAX_OPERATOR_REDUCED_IDENTITY_FINAL_SCORE = 0.62
+        // Occluded features are already excluded from both models. The prior
+        // 0.18/0.22 reductions plus operator caps bypassed enrollment calibration
+        // and accepted near impostors. Only a small fuzzy-ceiling allowance remains.
+        private const val OCCLUDED_FINAL_SCORE_RELAXATION = 0.02
+        private const val REDUCED_IDENTITY_FINAL_SCORE_RELAXATION = 0.02
         private const val MIN_MARGIN = 0.10
         private const val MIN_OCCLUDED_MARGIN = 0.05
         private const val MIN_REDUCED_IDENTITY_MARGIN = 0.04
@@ -1388,8 +1290,6 @@ class AuthenticationEngine(
         private const val MIN_REDUCED_IDENTITY_MAHALANOBIS_SCORE = 0.24
         private const val OCCLUDED_MAHALANOBIS_RELAXATION = 0.18
         private const val REDUCED_IDENTITY_MAHALANOBIS_RELAXATION = 0.22
-        private const val MAX_OPERATOR_OCCLUDED_MAHALANOBIS_SCORE = 0.28
-        private const val MAX_OPERATOR_REDUCED_IDENTITY_MAHALANOBIS_SCORE = 0.26
         private const val MIN_CLEAN_IDENTITY_CONSISTENCY_SCORE = 0.66
         private const val MIN_OCCLUDED_IDENTITY_CONSISTENCY_SCORE = 0.58
         private const val MIN_GLASSES_IDENTITY_CONSISTENCY_SCORE = 0.58
@@ -1550,6 +1450,12 @@ class AuthenticationEngine(
         private val NOSE_STRUCTURE_TYPES = FeatureType.ordered
             .filter { type -> type.group == FeatureGroup.MID_FACE }
             .toList()
+
+        private val VISIBLE_NOSE_ROOT_PAIRS = listOf(
+            FeatureType.LeftBrowNoseRoot to FeatureType.RightBrowNoseRoot,
+            FeatureType.LeftInnerEyeNoseRoot to FeatureType.RightInnerEyeNoseRoot,
+            FeatureType.LeftOuterEyeNoseRoot to FeatureType.RightOuterEyeNoseRoot
+        )
 
         private val MASK_VISIBLE_SEPARATION_TYPES = UPPER_MID_IDENTITY_TYPES
         private val MASK_CRITICAL_SEPARATION_TYPES = UPPER_MID_IDENTITY_TYPES

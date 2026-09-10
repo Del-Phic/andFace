@@ -23,11 +23,17 @@ class LivenessTracker {
     private var anchorPitch: Double = 0.0
 
     fun add(frame: RawFeatureFrame, hint: OcclusionHint = OcclusionHint()): LivenessResult {
+        val previousTimestamp = frames.lastOrNull()?.timestampMs
+        if (previousTimestamp != null &&
+            (frame.timestampMs <= previousTimestamp || frame.timestampMs - previousTimestamp > MAX_FRAME_GAP_MS)
+        ) reset()
         if (frames.isEmpty()) {
             startChallenge(frame)
         }
         frames.addLast(frame)
-        while (frames.size > MAX_FRAMES) {
+        while (frames.size > MAX_FRAMES ||
+            frame.timestampMs - frames.first().timestampMs > MAX_WINDOW_DURATION_MS
+        ) {
             frames.removeFirst()
         }
         return evaluate(hint)
@@ -210,6 +216,8 @@ class LivenessTracker {
     companion object {
         private val random = SecureRandom()
         private const val MAX_FRAMES = 36
+        private const val MAX_FRAME_GAP_MS = 1_500L
+        private const val MAX_WINDOW_DURATION_MS = 4_000L
         private const val MIN_FRAMES = 8
         private const val MIN_STRONG_PASSIVE_FRAMES = 12
         private const val MIN_PASSIVE_TIME_SPAN_MS = 330L

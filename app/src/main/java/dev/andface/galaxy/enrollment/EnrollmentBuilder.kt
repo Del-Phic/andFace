@@ -321,8 +321,8 @@ object EnrollmentBuilder {
     private const val MIN_CALIBRATED_CLEAN_MAHALANOBIS_FLOOR = 0.84
     private const val MIN_CALIBRATED_CLEAN_FINAL_SCORE_FLOOR = 0.78
     private const val MIN_CALIBRATION_VISIBILITY = 0.15
-    private const val CALIBRATION_FUZZY_WEIGHT = 0.70
-    private const val CALIBRATION_MAHALANOBIS_WEIGHT = 0.30
+    private const val CALIBRATION_FUZZY_WEIGHT = 0.72
+    private const val CALIBRATION_MAHALANOBIS_WEIGHT = 0.28
 
     private val OPTIONAL_IRIS_TYPES = FeatureType.ordered.filter { it.isIrisFeature }
 
