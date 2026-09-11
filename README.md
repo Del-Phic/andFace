@@ -7,6 +7,14 @@ scoring.
 Use [FIELD_DEPLOYMENT_CHECKLIST.md](FIELD_DEPLOYMENT_CHECKLIST.md) for Galaxy
 device validation and presentation testing.
 
+## Optional Java Backend (S195)
+
+A separate Java 21 / Spring Boot server now stores account-scoped authentication
+results in PostgreSQL. Recognition stays entirely on Android, using the existing
+170-feature engine and Fuzzy 0.72 / Mahalanobis 0.28 weights.
+Tap the version label to configure the optional server connection.
+See [backend/README.md](backend/README.md) for setup, APIs, field mapping and limitations.
+
 ## Core Policy
 
 - This is not template matching.

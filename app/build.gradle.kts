@@ -61,8 +61,8 @@ android {
         applicationId = "dev.andface.galaxy"
         minSdk = 26
         targetSdk = 35
-        versionCode = 194
-        versionName = "2.00-face-auth-s194"
+        versionCode = 195
+        versionName = "2.01-server-s195"
     }
 
     compileOptions {
@@ -126,6 +126,9 @@ tasks.named("preBuild") {
 }
 
 dependencies {
+    implementation("com.squareup.retrofit2:retrofit:3.0.0")
+    implementation("com.squareup.retrofit2:converter-gson:3.0.0")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.0")

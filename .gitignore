@@ -39,3 +39,8 @@ PACKAGE_README_KR.md
 *.pfx
 .env
 .env.*
+
+# Independent Java backend
+backend/target/
+backend/.local/
+!backend/.env.example

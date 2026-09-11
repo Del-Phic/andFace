@@ -1,6 +1,5 @@
 package dev.andface.galaxy.access
 
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -12,7 +11,7 @@ class DeploymentSecurityConfigTest {
 
         assertTrue(manifest.contains("""<uses-permission android:name="android.permission.CAMERA" />"""))
         assertTrue(manifest.contains("""<uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />"""))
-        assertFalse(manifest.contains("android.permission.INTERNET"))
+        assertTrue(manifest.contains("android.permission.INTERNET"))
         assertTrue(manifest.contains("""android:allowBackup="false""""))
         assertTrue(manifest.contains("""android:fullBackupContent="@xml/backup_rules""""))
         assertTrue(manifest.contains("""android:dataExtractionRules="@xml/data_extraction_rules""""))

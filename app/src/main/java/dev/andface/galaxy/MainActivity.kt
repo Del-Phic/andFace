@@ -82,6 +82,7 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
     private lateinit var userLabel: TextView
     private lateinit var resultText: TextView
     private lateinit var failureReasonText: TextView
+    private var serverRepository: dev.andface.galaxy.network.repository.ServerRepository? = null
     private lateinit var modelStateText: TextView
     private lateinit var fuzzyScoreText: TextView
     private lateinit var mahalanobisScoreText: TextView
@@ -182,6 +183,11 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
         configureSecureWindow()
         setContentView(R.layout.activity_main)
         bindViews()
+        serverRepository = runCatching { dev.andface.galaxy.network.repository.ServerRepository.get(this) }.getOrNull()
+        modelStateText.contentDescription = "버전 정보 · 탭하여 서버 연결 설정"
+        modelStateText.setOnClickListener {
+            startActivity(android.content.Intent(this, dev.andface.galaxy.network.ServerConnectionActivity::class.java))
+        }
         configureObscuredTouchProtection()
 
         repository = EnrollmentRepository(this)
@@ -1011,6 +1017,8 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
             observableText.text = "\uAD00\uCE21 ${result.observableCount}/${FeatureType.COUNT}"
         }
         occlusionText.text = "\uAC00\uB9BC ${displayOcclusion(result.occlusionSummary)}"
+        // Optional upload follows the final screen render and cannot change recognition.
+        serverRepository?.onRendered(incomingResult, result, selectedUserId)
     }
 
     private fun copyCurrentFieldCsvRowToClipboard() {
@@ -1557,7 +1565,7 @@ class MainActivity : ComponentActivity(), FaceLandmarkerRunner.Listener {
     private fun metric(label: String, value: Double): String = String.format(Locale.US, "%s %.3f", label, value)
 
     companion object {
-        private const val APP_REVISION = "\uAC24\uB7ED\uC2DC \uC5BC\uAD74 \uC778\uC99D S194"
+        private const val APP_REVISION = "\uAC24\uB7ED\uC2DC \uC5BC\uAD74 \uC778\uC99D S195"
         private const val FINAL_APK_FILE_NAME = "AndFace_Galaxy_face_auth_s194-debug.apk"
         private const val ENROLLMENT_SAMPLE_COUNT = 45
         private const val ENROLLMENT_SESSION_TIMEOUT_MS = 60_000L
